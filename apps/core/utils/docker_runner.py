@@ -3,36 +3,54 @@ import os
 
 
 class DockerRunner:
+    """
+    A restricted code execution runner based on Docker.
+    This type is responsible for creating isolated container environments to run the code submitted by students. It integrates multiple levels of security restrictions:
+    1. Resource isolation: Limiting CPU, memory and the number of processes.
+    2. Network isolation: Disabling container networking to prevent data leakage.
+    3. Time limit: Enforcing timeout control to prevent dead-loop tasks.
+    4. Automatic cleanup: Ensuring that the containers are physically deleted after their operation, releasing system resources.
+    """
     def __init__(self):
         try:
             self.client = docker.from_env()
         except Exception as e:
-            print(f"Docker 连接失败: {e}")
+            print(f"Docker connection failed: {e}")
             self.client = None
 
     def run_code(self, file_path, is_project=False, project_root=None):
         """
-        全量精进版：支持 AI 识别路径、包名自动转换及路径符号兼容
+        Execute the code within the Docker sandbox and capture the running results.
+        This method supports Python and Java. For compiled languages such as Java, there are built-in scripts for automatic compilation and execution.
+        :param file_path: The absolute path of the main file to be executed.
+        :param is_project: Is it a multi-file project mode? The default is False.
+        :param project_root: The root directory path of the project (valid only in project mode).
+        :return:
+            dict: Dictionary containing the running results:
+            - exit_code (int): Exit status code of the process.
+            - output (str): Output from the run (stdout/stderr).
+            - status (str): Execution status (success/failed/timeout/error).
+            - compile_status (bool): Whether the compilation was successful.
         """
         if not self.client:
             return {
                 "exit_code": -1,
-                "output": "Docker 引擎未启动",
+                "output": "Docker engine is not running.",
                 "status": "timeout_or_error",
                 "compile_status": False
             }
 
         ext = os.path.splitext(file_path)[1].lower()
 
-        # 1. 确定物理挂载路径
+        # 1. Path mapping and mounting logic: Map the host machine project path to /workspace within the container.
         host_path = os.path.abspath(project_root if is_project else os.path.dirname(file_path))
         container_path = "/workspace"
 
-        # 🚀 路径兼容逻辑：处理 Windows 的反斜杠，确保在容器内（Linux）运行正常
+        # Handling relative paths: Ensure that when commands are executed within the container, the files can be accurately located.
         rel_file_path = os.path.relpath(file_path, project_root) if is_project else os.path.basename(file_path)
         rel_file_path = rel_file_path.replace("\\", "/")
 
-        # 2. 生成运行配置
+        # 2. Based on language generation running strategies (Image, Command, Resource Limits)
         if ext == '.py':
             image = "python:3.9-slim"
             command = f"python {rel_file_path}"
@@ -42,24 +60,18 @@ class DockerRunner:
         elif ext == '.java':
             image = "eclipse-temurin:17-jdk-alpine"
 
-            # 🚀 智能包名识别逻辑 (解决 Could not find or load main class)
-            # 逻辑：如果路径是 src/com/abc/Main.java，自动拆分为：
-            # working_sub_dir = "src"
-            # class_name = "com.abc.Main"
+            # Smart package name recognition: For Java projects with a package structure, locate the main class name
             parts = rel_file_path.split('/')
             if 'src' in parts:
                 src_index = parts.index('src')
-                # 提取 src 之后的路径作为包路径
                 package_parts = parts[src_index + 1:]
                 class_name = '.'.join(package_parts).replace('.java', '')
-                # 切换到 src 所在的父目录或直接进入 src
                 working_sub_dir = '/'.join(parts[:src_index + 1])
             else:
-                # 如果没有 src 目录，则尝试根据当前路径生成类名
                 class_name = rel_file_path.replace('.java', '').replace('/', '.')
                 working_sub_dir = "."
 
-            # 核心脚本：先 cd 到正确的包根目录，再用 -cp . 运行
+            # Combining Shell commands: Execute the compilation and determine the compilation result based on the exit code. If it passes, then execute.
             command = (
                 f"sh -c 'cd {working_sub_dir} && find . -name \"*.java\" > sources.txt && "
                 f"javac @sources.txt 2>compile_errors.log; "
@@ -70,27 +82,47 @@ class DockerRunner:
             is_compiled_lang = True
 
         else:
-            return {"exit_code": -1, "output": f"不支持 {ext}", "status": "error", "compile_status": False}
+            return {"exit_code": -1, "output": f"不支持的扩展名: {ext}", "status": "error", "compile_status": False}
 
+        container = None
         try:
-            # 3. 执行容器
+            # 3. Start and configure the container: Add core security and resource limitations
             container = self.client.containers.run(
                 image=image,
                 command=command,
                 volumes={host_path: {'bind': container_path, 'mode': 'rw'}},
                 working_dir=container_path,
                 detach=True,
-                mem_limit=mem_limit,
-                network_disabled=True,
+
+                # --- Core security and resource limitations ---
+                mem_limit=mem_limit,  # Memory Limitation
+                memswap_limit=mem_limit,  # Prohibit the use of swap partitions to prevent IO performance fluctuations.
+                nano_cpus=500000000,  # CPU limit: 0.5 core (to prevent dead loops from exhausting resources)
+                network_disabled=True,  # Disable network connection (to prevent data leakage)
+                pids_limit=50,  # Limit the number of processes (to prevent the Fork bomb attack)
+                # -------------------------
+
+                stdout=True,
+                stderr=True
             )
 
-            # 4. 结果捕获 (25s 超时，多文件项目需要更多编译时间)
-            result = container.wait(timeout=25)
-            exit_code = result.get("StatusCode", 0)
-            output = container.logs().decode('utf-8', errors='ignore')
-            container.remove()
+            # 4. Implement monitoring and timeout capture
+            try:
+                result = container.wait(timeout=25)
+                exit_code = result.get("StatusCode", 0)
+                output = container.logs().decode('utf-8', errors='replace')
+            except Exception:
+                # Timeout response: Immediately terminate the container and return the timeout status.
+                if container:
+                    container.kill()
+                return {
+                    "exit_code": -1,
+                    "output": "Timeout occurred: The code execution exceeded the preset limit of 25 seconds.",
+                    "status": "timeout",
+                    "compile_status": True
+                }
 
-            # 逻辑判断
+            # Compilation status identification: 100 is the error code we have agreed upon in shell commands to indicate a compilation failure.
             compile_success = True
             if is_compiled_lang and exit_code == 100:
                 compile_success = False
@@ -105,7 +137,14 @@ class DockerRunner:
         except Exception as e:
             return {
                 "exit_code": -1,
-                "output": f"沙箱运行异常: {str(e)}",
-                "status": "timeout_or_error",
+                "output": f"Sandbox operation failed: {str(e)}",
+                "status": "error",
                 "compile_status": False
             }
+        finally:
+            # 5. Garbage collection: Regardless of success or failure, forcibly clear the container to keep the system clean.
+            if container:
+                try:
+                    container.remove(force=True)
+                except:
+                    pass
