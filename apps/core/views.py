@@ -17,7 +17,7 @@ from .serializers import (
     AssignmentSerializer,
     SubmissionSerializer,
     MyTokenObtainPairSerializer,
-    CourseSerializer
+    CourseSerializer, KnowledgePointSerializer
 )
 from .utils.ai_scorer import AIScorer
 from .utils.project_analyzer import ProjectAnalyzer
@@ -129,6 +129,18 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
             return Response({"error": "Evaluation records do not exist"}, status=404)
 
 
+class KnowledgePointViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Knowledge point dictionary query view set.
+    The interface acts as a common dictionary table that allows all log in users, teachers and students, to view a list of knowledge points within the system.
+    Since it is only used for data retrieval, ReadOnlyModelViewSet is used to disable all additions, deletions and changes.
+    Permission Restrictions: Restrict access to IsAuthenticated users only.
+    """
+    queryset = KnowledgePoint.objects.all()
+    serializer_class = KnowledgePointSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+
 class TeacherCourseViewSet(viewsets.ModelViewSet):
     """
     Set of views for teacher-side course management.
@@ -226,19 +238,27 @@ class TeacherStudentManagementViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['post'], url_path='import-students')
     def import_students(self, request):
         """
-        Batch create student accounts by uploading Excel/CSV files, and optionally add them to the specified courses.
-        :param request: DRF Request Object.
-        :return: Response: A successful statistical message including the number of newly created students and the number of students who have enrolled in the course.
+        Create student accounts in bulk by uploading Excel/CSV files, and optionally pull one button into a specific course.
+        :param request: DRF request object.
+                        -FILES ['file']: The uploaded form file.
+                        -data ['course_id'] (int, optional): Target course ID.
+        :return: Response: Success message containing creation and enrollment statistics
         """
         file = request.FILES.get('file')
         course_id = request.data.get('course_id')
 
         if not file:
-            return Response({"error": "请上传 Excel 或 CSV 文件"}, status=400)
+            return Response({"error": "Please upload Excel or CSV file"}, status=400)
 
         try:
-            df = pd.read_csv(file) if file.name.endswith('.csv') else pd.read_excel(file)
-            df.columns = [c.strip().lower() for c in df.columns]
+            # Force all columns to be read as plain text, and prohibit Pandas from converting student numbers to floating-point numbers or scientific notation
+            if file.name.endswith('.csv'):
+                df = pd.read_csv(file, dtype=str)
+            else:
+                df = pd.read_excel(file, dtype=str)
+
+            # Clean the list header to prevent the UTF-8 BOM header of the CSV file from making student_id unrecognizable
+            df.columns = [str(c).strip().replace('\ufeff', '').lower() for c in df.columns]
 
             created_count = 0
             enrolled_count = 0
@@ -250,6 +270,11 @@ class TeacherStudentManagementViewSet(viewsets.ViewSet):
 
                 for _, row in df.iterrows():
                     sid = str(row.get('student_id', '')).strip()
+
+                    # If Pandas or Excel still add ".0" to the end by mistake, force the removal
+                    if sid.endswith('.0'):
+                        sid = sid[:-2]
+
                     if not sid or sid == 'nan':
                         continue
 
@@ -273,15 +298,15 @@ class TeacherStudentManagementViewSet(viewsets.ViewSet):
                             enrolled_count += 1
 
             return Response({
-                "message": f"Import successful: {created_count} new students have been created, and {enrolled_count} students have been enrolled in the course."
+                "message": f"Import success: {created_count} new student accounts are created and {enrolled_count} people are added to the course."
             })
 
         except Course.DoesNotExist:
-            return Response({"error": "The specified course does not exist or you do not have the authority to operate this course."}, status=404)
+            return Response({"error": "The specified course does not exist or you do not have permission to operate it."}, status=404)
         except Exception as e:
             import traceback
             traceback.print_exc()
-            return Response({"error": f"Table parsing failed: {str(e)}"}, status=400)
+            return Response({"error": f"Failed table parsing: {str(e)}"}, status=400)
 
 
 # Student Side View
@@ -431,7 +456,7 @@ class StudentSubmissionViewSet(viewsets.ModelViewSet):
         """
         from .tasks import run_grading_task
 
-        # 确保基础临时目录存在
+        # Make sure the base temporary directory exists
         temp_base = os.path.join(settings.MEDIA_ROOT, 'temp')
         os.makedirs(temp_base, exist_ok=True)
 
@@ -440,28 +465,28 @@ class StudentSubmissionViewSet(viewsets.ModelViewSet):
         entry_point = None
 
         try:
-            print(f"[Pipeline] Commencing processing of Submission: {submission.id}")
+            print(f"[Pipeline] starts processing submissions: {submission.id}")
 
             if submission.sub_type == 'archive':
-                # Check the physical path
+                # Checking physical paths
                 file_path = submission.file.path
-                print(f"[Pipeline] Checking file path: {file_path}")
+                print(f"[Pipeline] is checking the file path: {file_path}")
                 if not os.path.exists(file_path):
-                    raise FileNotFoundError(f"The file was not saved correctly to the disk: {file_path}")
+                    raise FileNotFoundError(f"The file is not saved to disk correctly: {file_path}")
 
                 scorer = AIScorer()
                 analyzer = ProjectAnalyzer(ai_client=scorer)
 
-                print(f"[Pipeline] Decompressing to: {temp_workspace}")
+                print(f"[Pipeline] unpacking to: {temp_workspace}")
                 analyzer.unzip_project(file_path, temp_workspace)
 
-                print(f"[Pipeline] Analyzing the project structure...")
+                print(f"[Pipeline] is analyzing the project structure...")
                 contexts = scorer.get_rag_contexts(submission)
-                task_requirement = contexts.get('l3', "Determine the entry point of the main program.")
+                task_requirement = contexts.get('l3', "Determine the main program entry point.")
                 entry_point = analyzer.get_entry_point(temp_workspace, task_context=task_requirement)
 
             # Dispatch asynchronous tasks
-            print(f"[Pipeline] Dispatching asynchronous tasks to Celery... EntryPoint: {entry_point}")
+            print(f"[Pipeline] Dispatches asynchronous tasks to Celery... EntryPoint: {entry_point}")
             run_grading_task.delay(
                 submission_id=submission.id,
                 temp_workspace=temp_workspace,
@@ -470,10 +495,10 @@ class StudentSubmissionViewSet(viewsets.ModelViewSet):
 
             submission.status = 'running'
             submission.save()
-            print(f"[Pipeline] Status update successful: Running")
+            print(f"[Pipeline] status update successful: Running")
 
         except Exception as e:
-            print(f"[Pipeline ERROR] Submission {submission.id} failed:")
+            print(f"[Pipeline ERROR] Submission {submission.id} Fail:")
             traceback.print_exc()
             submission.status = 'failed'
             submission.save()
