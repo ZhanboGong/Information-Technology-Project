@@ -3,17 +3,31 @@ from .models import User, Assignment, Submission, Course, AIEvaluation, Knowledg
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 
-# --- 1. 用户序列化器 (保持原样) ---
+# --- 1. User serializer---
 class UserSerializer(serializers.ModelSerializer):
+    """
+    Serialization of basic user information.
+    It is used to show the personal profile of students or teachers and hide sensitive information.
+    """
     class Meta:
         model = User
         fields = ['id', 'username', 'role', 'student_id_num', 'class_name', 'first_name']
         read_only_fields = ['id', 'role']
 
 
-# --- 2. 登录令牌序列化器 (保持原样) ---
+# --- 2. Login token serializer ---
 class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
+    """
+    Custom JWT authentication serializer.
+    In addition to returning the Access/Refresh Token, it injects common contexts such as user role and username.
+    Reduce the number of requests to the user information interface again after the front-end login.
+    """
     def validate(self, attrs):
+        """
+        Rewrite the validation logic: While generating the Token, extract and return the user information.
+        :param attrs: The original properties dictionary containing username and password.
+        :return: A dictionary containing access, refresh, and extension information such as role and username.
+        """
         data = super().validate(attrs)
         data['role'] = self.user.role
         data['username'] = self.user.username
@@ -22,15 +36,23 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
         return data
 
 
-# --- 3. 知识点序列化器 (保持原样) ---
+# --- 3. Knowledge point serializer ---
 class KnowledgePointSerializer(serializers.ModelSerializer):
+    """
+    Knowledge point dictionary serializer.
+    Used in the job detail page to convert the knowledge point ID into specific readable information.
+    """
     class Meta:
         model = KnowledgePoint
         fields = ['id', 'name', 'category', 'is_system', 'description']
 
 
-# --- 4. 课程序列化器 (保持原样) ---
+# --- 4. The course serializer ---
 class CourseSerializer(serializers.ModelSerializer):
+    """
+    Course data serializer.
+    The reverse statistics function is integrated to show how active the course is.
+    """
     student_count = serializers.IntegerField(source='students.count', read_only=True)
     teacher_name = serializers.ReadOnlyField(source='teacher.username')
 
@@ -39,8 +61,12 @@ class CourseSerializer(serializers.ModelSerializer):
         fields = ['id', 'name', 'description', 'teacher', 'teacher_name', 'student_count', 'created_at']
 
 
-# --- 5. 作业序列化器 (保持原样) ---
+# --- 5. Assessment serializer ---
 class AssignmentSerializer(serializers.ModelSerializer):
+    """
+    Assessment detail serializer.
+    The nested design is used to completely package the job configuration information with the associated knowledge point metadata.
+    """
     course_name = serializers.ReadOnlyField(source='course.name')
     kp_details = KnowledgePointSerializer(source='knowledge_points', many=True, read_only=True)
 
@@ -54,35 +80,44 @@ class AssignmentSerializer(serializers.ModelSerializer):
         ]
 
 
-# --- 6. AI 评价结果简版 (代表“本次提交”的得分详情) ---
+# --- 6. AI evaluation result serializer ---
 class AIEvaluationSimpleSerializer(serializers.ModelSerializer):
+    """
+    Single-pass evaluation feedback serializer.
+    Focus on showing specific rating facts and AI feedback for a particular submission.
+    """
     class Meta:
         model = AIEvaluation
-        # 注意：这里的 total_score 是单次提交的得分
+        # Note: total_score here is the score for a single commit
         fields = ['total_score', 'feedback', 'scores', 'kp_scores', 'raw_sandbox_output', 'is_published']
 
 
-# --- 7. Docker 报告 (保持原样) ---
+# --- 7. Docker Report Serializer ---
 class DockerReportSerializer(serializers.ModelSerializer):
+    """
+    Sandbox runs the report serializer.
+    Shows the raw state data of the underlying container after execution.
+    """
     class Meta:
         model = DockerReport
         fields = ['exit_code', 'stdout', 'compile_status', 'execution_time', 'status']
 
 
-# --- 8. 提交记录序列化器 (🚀 核心适配最高分展示) ---
+# --- 8. Submission Serializer ---
 class SubmissionSerializer(serializers.ModelSerializer):
-    # 嵌套作业信息
+    """
+    Submission record core serializer (integrates highest score logic).
+    This class is nested with multiple SerializerMethodFields,
+    All the data requirements for "one request to get the submission and the associated highest score" are implemented.
+    """
     assignment_info = AssignmentSerializer(source='assignment', read_only=True)
 
-    # 嵌套 AI 评价 (展示本次提交的详情)
     ai_evaluation = AIEvaluationSimpleSerializer(read_only=True)
 
-    # 嵌套 Docker 报告
     docker_report = DockerReportSerializer(read_only=True)
 
     student_name = serializers.ReadOnlyField(source='student.username')
 
-    # 🚀 兼容性字段：计算属性
     ai_score = serializers.SerializerMethodField()
 
     class Meta:
@@ -93,7 +128,7 @@ class SubmissionSerializer(serializers.ModelSerializer):
             'student_name',
             'assignment',
             'assignment_info',
-            'ai_evaluation',  # 🚀 这里面是“本次得分”
+            'ai_evaluation',
             'docker_report',
             'file',
             'status',
@@ -107,14 +142,15 @@ class SubmissionSerializer(serializers.ModelSerializer):
 
     def get_ai_score(self, obj):
         """
-        保持逻辑一致性：
-        如果 final_score 已由 GradingPipeline 计算并存入，直接返回。
-        这确保了前端显示的 ai_score 字段永远是历史最高记录。
+        Maintain logical consistency:
+        If final_score was already computed and stored by GradingPipeline, it is returned.
+        This ensures that the ai_score field displayed on the frontend is always the all-time high.
+        :param obj: The Submission instance that is currently being serialized.
+        :return: The final presentation score.
         """
         if obj.final_score is not None:
             return obj.final_score
 
-        # 兜底逻辑：如果任务还没跑完，尝试从本次评价里取
         try:
             return obj.ai_evaluation.total_score
         except:
