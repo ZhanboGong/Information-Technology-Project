@@ -7,7 +7,8 @@ from .views import (
     TeacherStudentManagementViewSet, # 🚀 导入新增视图
     StudentAssignmentViewSet,
     StudentSubmissionViewSet,
-    StudentCourseViewSet
+    StudentCourseViewSet,
+    UserProfileViewSet
 )
 from rest_framework_simplejwt.views import TokenRefreshView
 
@@ -29,6 +30,8 @@ router.register(r'student/assignments', StudentAssignmentViewSet, basename='stud
 router.register(r'student/submissions', StudentSubmissionViewSet, basename='student-submission')
 # /api/auth/student/courses/  <-- 新增这个
 router.register(r'student/courses', StudentCourseViewSet, basename='student-course')
+
+router.register(r'profile', UserProfileViewSet, basename='user-profile')
 
 urlpatterns = [
     # 1. 路由器生成的 API 路径 (包括上面所有的 register 路径)

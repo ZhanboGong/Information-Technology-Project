@@ -133,8 +133,8 @@ class SubmissionSerializer(serializers.ModelSerializer):
             'file',
             'status',
             'sub_type',
-            'final_score',  # 🚀 重点：这里现在存的是“历史最高分”
-            'ai_score',  # 🚀 重点：这里返回的是“历史最高分”
+            'final_score',
+            'ai_score',
             'created_at',
             'attempt_number'
         ]
@@ -155,3 +155,17 @@ class SubmissionSerializer(serializers.ModelSerializer):
             return obj.ai_evaluation.total_score
         except:
             return 0
+
+
+class UserProfileSerializer(serializers.ModelSerializer):
+    """用于修改个人资料的序列化器"""
+    class Meta:
+        model = User
+        # 允许修改的字段（不要包含 role 或 student_id_num 等关键字段，防止越权）
+        fields = ['id', 'username', 'first_name', 'last_name', 'email', 'class_name']
+        read_only_fields = ['username'] # 通常学号/用户名不准修改
+
+class ChangePasswordSerializer(serializers.Serializer):
+    """用于修改密码的序列化器"""
+    old_password = serializers.CharField(required=True)
+    new_password = serializers.CharField(required=True)

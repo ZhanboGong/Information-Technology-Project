@@ -17,7 +17,7 @@ from .serializers import (
     AssignmentSerializer,
     SubmissionSerializer,
     MyTokenObtainPairSerializer,
-    CourseSerializer, KnowledgePointSerializer
+    CourseSerializer, KnowledgePointSerializer, UserProfileSerializer, ChangePasswordSerializer
 )
 from .utils.ai_scorer import AIScorer
 from .utils.project_analyzer import ProjectAnalyzer
@@ -127,6 +127,61 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
             return Response({"message": "The results have been updated and published"})
         except AIEvaluation.DoesNotExist:
             return Response({"error": "Evaluation records do not exist"}, status=404)
+
+    @action(detail=False, methods=['post'], url_path='suggest-kps')
+    def suggest_knowledge_points(self, request):
+        """
+
+        :param request:
+        :return:
+        """
+        title = request.data.get('title', '')
+        content = request.data.get('content', '')
+        language = request.data.get('language', 'python')
+
+        if not content:
+            return Response({"error": "作业要求（描述）不能为空"}, status=400)
+
+        scorer = AIScorer()
+        # 优化 Prompt：明确要求不要包含 Markdown 代码块标签
+        prompt = f"""
+            你是一名专业的编程教学助理。请根据以下作业任务，识别出学生完成该作业需要掌握的 3-5 个核心编程知识点（L2 级别）。
+
+            作业标题：{title}
+            作业要求：{content}
+            编程语言：{language}
+
+            要求：
+            1. 知识点名称要简练（如：递归调用、类继承、异常处理）。
+            2. 详细考核逻辑应说明学生需要如何实现或运用该技术点。
+            3. 直接输出 JSON 结果，不要包含任何 Markdown 格式的标签（如 ```json）。
+
+            JSON 格式如下：
+            {{
+                "suggested_kps": [
+                    {{"name": "知识点名称", "description": "详细考核逻辑说明"}},
+                    ...
+                ]
+            }}
+            """
+
+        try:
+            raw_res = scorer.ask(prompt)
+
+            # 清洗 AI 可能返回的 Markdown 标签
+            if "```json" in raw_res:
+                raw_res = raw_res.split("```json")[-1].split("```")[0].strip()
+            elif "```" in raw_res:
+                raw_res = raw_res.split("```")[-1].split("```")[0].strip()
+
+            import json
+            suggestions = json.loads(raw_res)
+            return Response(suggestions)
+        except json.JSONDecodeError:
+            print(f"❌ AI 返回内容无法解析: {raw_res}")
+            return Response({"error": "AI 返回格式异常，请稍后再试"}, status=500)
+        except Exception as e:
+            return Response({"error": f"AI 生成失败: {str(e)}"}, status=500)
 
 
 class KnowledgePointViewSet(viewsets.ReadOnlyModelViewSet):
@@ -502,3 +557,38 @@ class StudentSubmissionViewSet(viewsets.ModelViewSet):
             traceback.print_exc()
             submission.status = 'failed'
             submission.save()
+
+
+class UserProfileViewSet(viewsets.GenericViewSet):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = UserProfileSerializer
+
+    @action(detail=False, methods=['get', 'put', 'patch'], url_path='me')
+    def manage_me(self, request):
+        """获取或更新当前登录用户的信息"""
+        instance = request.user
+        if request.method == 'GET':
+            serializer = self.get_serializer(instance)
+            return Response(serializer.data)
+
+        # 更新逻辑
+        serializer = self.get_serializer(instance, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['post'], url_path='change-password')
+    def change_password(self, request):
+        """修改密码"""
+        serializer = ChangePasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = request.user
+
+        # 校验旧密码
+        if not user.check_password(serializer.data.get('old_password')):
+            return Response({"error": "旧密码错误"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 设置新密码
+        user.set_password(serializer.data.get('new_password'))
+        user.save()
+        return Response({"message": "密码修改成功"})
