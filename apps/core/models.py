@@ -2,8 +2,12 @@ from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.conf import settings
 
-# 1. 用户表 (保持原样)
+# User Table
 class User(AbstractUser):
+    """
+    The system adopts a unified user model.
+    It has expanded the role field, student ID/work ID, and class information, and supports three types of identities: administrators, teachers, and students.
+    """
     ROLE_CHOICES = (
         ('admin', '管理员'),
         ('teacher', '教师'),
@@ -16,8 +20,12 @@ class User(AbstractUser):
     def __str__(self):
         return f"{self.username} ({self.get_role_display()})"
 
-# 2. 课程表 (保持原样)
+# Course Table
 class Course(models.Model):
+    """
+    Teaching curriculum model.
+    Core logic: One teacher corresponds to multiple courses (1:N), and one course corresponds to multiple students (M:N).
+    """
     name = models.CharField(max_length=100, verbose_name="课程名称")
     description = models.TextField(null=True, blank=True, verbose_name="课程描述")
     teacher = models.ForeignKey(User, on_delete=models.CASCADE, related_name='teaching_courses', verbose_name="授课教师")
@@ -27,8 +35,12 @@ class Course(models.Model):
     def __str__(self):
         return self.name
 
-# 3. 知识点表 (恢复你的原版：is_system, category, language)
+# KnowledgePoint Table
 class KnowledgePoint(models.Model):
+    """
+    Knowledge point/assessment dimension model.
+    Supporting hierarchical management (L1 system-level general, L2 course-specific) is a key context for RAG retrieval when AI scoring.
+    """
     name = models.CharField(max_length=100, verbose_name="知识点简称")
     description = models.TextField(null=True, blank=True, verbose_name="详细考核逻辑")
     category = models.CharField(max_length=50, null=True, verbose_name="分类(L1/L2)")
@@ -44,8 +56,14 @@ class KnowledgePoint(models.Model):
     def __str__(self):
         return f"[{self.category}] {self.name}"
 
-# 4. 作业表 (恢复你的原版：rubric_config, reference_logic)
+# 4. Assessment Table
 class Assignment(models.Model):
+    """
+    The assessment task model.
+    Contains the core correction configuration:
+        - rubric_config: Defines scoring dimensions (e.g. code style, feature implementation, etc.)
+        -reference_logic: The Layer 3 reference logic point provided to the AI (e.g. recursion must be used).
+    """
     title = models.CharField(max_length=200, verbose_name="作业标题")
     content = models.TextField(verbose_name="作业要求")
     course = models.ForeignKey(Course, on_delete=models.CASCADE, verbose_name="所属课程")
@@ -62,8 +80,12 @@ class Assignment(models.Model):
     def __str__(self):
         return self.title
 
-# 5. 提交记录 (保持原样)
+# 5. Submission Table
 class Submission(models.Model):
+    """
+    The student submits the record model.
+    It acts as a state carrier for the Pipeline that keeps track of the final score for each attempt.
+    """
     SUBMISSION_TYPE_CHOICES = (('file', '单文件'), ('archive', '项目压缩包'))
     STATUS_CHOICES = (('pending', '待处理'), ('running', '运行中'), ('completed', '已完成'), ('failed', '失败'))
     sub_type = models.CharField(max_length=10, choices=SUBMISSION_TYPE_CHOICES, default='file')
@@ -75,27 +97,29 @@ class Submission(models.Model):
     final_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
-# 6. Docker 报告 (精进点：增加 compile_status)
+# 6. Docker Report Table
 class DockerReport(models.Model):
     submission = models.OneToOneField('Submission', on_delete=models.CASCADE, related_name='docker_report')
     exit_code = models.IntegerField(null=True)
     stdout = models.TextField(null=True, blank=True)
     stderr = models.TextField(null=True, blank=True)
-    # 🚀 精进字段：用于区分编译错误
     compile_status = models.BooleanField(default=True, verbose_name="编译状态")
     execution_time = models.FloatField(null=True)
     status = models.CharField(max_length=20, default='success')
     created_at = models.DateTimeField(auto_now_add=True)
 
-# 7. AI 评审报告 (精进点：增加 raw_sandbox_output 和 kp_scores)
+# 7. AI Evaluation Report Table
 class AIEvaluation(models.Model):
+    """
+    AI Intelligence Score report.
+    The DockerReport and Submission source code were used for semantic analysis.
+    kp_scores stores the performance of the specific knowledge point segmentation (L2 level).
+    """
     submission = models.OneToOneField('Submission', on_delete=models.CASCADE, related_name='ai_evaluation')
     ai_raw_score = models.DecimalField(max_digits=5, decimal_places=2, null=True)
     ai_raw_feedback = models.TextField(null=True)
-    # 🚀 精进字段：存储喂给 AI 的原始证据
     raw_sandbox_output = models.TextField(null=True, blank=True, verbose_name="沙箱原始反馈")
     scores = models.JSONField(verbose_name="维度得分")
-    # 🚀 精进字段：独立存储 L2 专项得分
     kp_scores = models.JSONField(verbose_name="知识点细分得分", default=dict)
     total_score = models.DecimalField(max_digits=5, decimal_places=2)
     feedback = models.TextField()
