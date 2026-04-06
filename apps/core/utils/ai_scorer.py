@@ -1,22 +1,40 @@
 import json
 import os
+import time
 from openai import OpenAI
+from dotenv import load_dotenv
 from django.db.models import Q
 from apps.core.models import KnowledgePoint
+from apps.analytics.models import AIServiceLog
+from .error_messages import AI_ERRORS
 
+# Load the contents of the .env file into environment variables
+load_dotenv()
 
 class AIScorer:
     def __init__(self):
-        # 保持 DeepSeek 配置
+        """
+        Initialize the DeepSeek client.
+        Read the API Key and Base URL from an environment variable. If BASE_URL is not set,
+        This will default to the official DeepSeek API.
+        """
+        api_key = os.getenv("DEEPSEEK_API_KEY")
+        base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
         self.client = OpenAI(
-            api_key="sk-f532188d5dd5436a920de5b44b1f9596",
-            base_url="https://api.deepseek.com"
+            api_key=api_key,
+            base_url=base_url
         )
 
     def ask(self, prompt):
         """
-        通用 AI 询问接口：用于项目结构分析或简单咨询
+        Send a conversation request to DeepSeek and get an AI reply.
+        A preset System Prompt is configured to ensure that the output conforms to the role of the "back-end assistant",
+        and exceptions are caught during API calls.
+        :param prompt: Pre-set the question content or instruction that needs i input
+        :return: Ai-generated response text.
+        If an exception occurs (e.g., a network problem, authentication failure, etc.), an empty string is returned.
         """
+        start_time = time.time()
         try:
             response = self.client.chat.completions.create(
                 model="deepseek-chat",
@@ -25,9 +43,31 @@ class AIScorer:
                     {"role": "user", "content": prompt}
                 ]
             )
+
+            # 流量监控
+            duration = time.time() - start_time
+            if response.usage:
+                AIServiceLog.objects.create(
+                    service_name='deepseek',
+                    endpoint='chat.completions/ask',
+                    prompt_tokens=response.usage.prompt_tokens,
+                    completion_tokens=response.usage.completion_tokens,
+                    total_tokens=response.usage.total_tokens,
+                    response_time=duration,
+                    status_code=200
+                )
+
             return response.choices[0].message.content
         except Exception as e:
-            print(f"❌ AI 询问接口异常: {str(e)}")
+            # 失败记录
+            duration = time.time() - start_time
+            AIServiceLog.objects.create(
+                service_name='deepseek',
+                endpoint='chat.completions/ask',
+                response_time=duration,
+                status_code=500
+            )
+            print(f"Error: AI 询问接口异常: {str(e)}")
             return ""
 
     def _read_project_source(self, project_path):
@@ -117,7 +157,7 @@ class AIScorer:
             "feedback": "## 运行诊断 \n... ## 逻辑建议 \n..."
         }}
         """
-
+        start_time = time.time()
         try:
             response = self.client.chat.completions.create(
                 model="deepseek-chat",
@@ -127,8 +167,29 @@ class AIScorer:
                 ],
                 response_format={'type': 'json_object'}
             )
+
+            # 流量监控
+            duration = time.time() - start_time
+            if response.usage:
+                AIServiceLog.objects.create(
+                    service_name='deepseek',
+                    endpoint='chat.completions/evaluate',
+                    prompt_tokens=response.usage.prompt_tokens,
+                    completion_tokens=response.usage.completion_tokens,
+                    total_tokens=response.usage.total_tokens,
+                    response_time=duration,
+                    status_code=200
+                )
             return json.loads(response.choices[0].message.content)
         except Exception as e:
+            # 失败记录
+            duration = time.time() - start_time
+            AIServiceLog.objects.create(
+                service_name='deepseek',
+                endpoint='chat.completions/evaluate',
+                response_time=duration,
+                status_code=500
+            )
             # 异常向上抛出，由 GradingPipeline 捕获并处理状态
             raise Exception(f"AI 评审引擎通信失败: {str(e)}")
 
