@@ -6,17 +6,15 @@ from dotenv import load_dotenv
 from django.db.models import Q
 from apps.core.models import KnowledgePoint
 from apps.analytics.models import AIServiceLog
-from .error_messages import AI_ERRORS
 
-# Load the contents of the .env file into environment variables
+# 加载环境变量
 load_dotenv()
 
 class AIScorer:
     def __init__(self):
         """
-        Initialize the DeepSeek client.
-        Read the API Key and Base URL from an environment variable. If BASE_URL is not set,
-        This will default to the official DeepSeek API.
+        初始化 DeepSeek 客户端。
+        从环境变量读取 API Key 和 Base URL。
         """
         api_key = os.getenv("DEEPSEEK_API_KEY")
         base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
@@ -27,12 +25,8 @@ class AIScorer:
 
     def ask(self, prompt):
         """
-        Send a conversation request to DeepSeek and get an AI reply.
-        A preset System Prompt is configured to ensure that the output conforms to the role of the "back-end assistant",
-        and exceptions are caught during API calls.
-        :param prompt: Pre-set the question content or instruction that needs i input
-        :return: Ai-generated response text.
-        If an exception occurs (e.g., a network problem, authentication failure, etc.), an empty string is returned.
+        通用 AI 问答接口：用于项目分析、入口文件检测等非评分任务。
+        解决 AttributeError: 'AIScorer' object has no attribute 'ask'。
         """
         start_time = time.time()
         try:
@@ -44,7 +38,7 @@ class AIScorer:
                 ]
             )
 
-            # 流量监控
+            # 流量监控日志
             duration = time.time() - start_time
             if response.usage:
                 AIServiceLog.objects.create(
@@ -59,21 +53,16 @@ class AIScorer:
 
             return response.choices[0].message.content
         except Exception as e:
-            # 失败记录
             duration = time.time() - start_time
             AIServiceLog.objects.create(
-                service_name='deepseek',
-                endpoint='chat.completions/ask',
-                response_time=duration,
-                status_code=500
+                service_name='deepseek', endpoint='chat.completions/ask',
+                response_time=duration, status_code=500
             )
-            print(f"Error: AI 询问接口异常: {str(e)}")
+            print(f"Error: AIScorer.ask 接口异常: {str(e)}")
             return ""
 
     def _read_project_source(self, project_path):
-        """
-        深度读取项目源码：支持多级目录遍历
-        """
+        """深度读取项目源码：支持多级目录遍历"""
         full_source = ""
         supported_exts = ('.py', '.java', '.c', '.cpp')
         for root, _, files in os.walk(project_path):
@@ -94,119 +83,124 @@ class AIScorer:
                         full_source += f"\n\n### FILE: {rel_path} ###\n```{lang}\n{content}\n```"
         return full_source
 
+    def _build_rubric_description(self, rubric_config):
+        """解析 L3 动态配置，生成 AI 评审指令文本"""
+        if not rubric_config or 'items' not in rubric_config:
+            return "根据通用编程规范评分。"
+
+        text = "### 严格评分标准与等级细则 (Layer 3)：\n"
+        for item in rubric_config.get('items', []):
+            name = item.get('criterion', '未命名维度')
+            weight = item.get('weight', 0)
+            text += f"\n- 维度: {name} (权重: {weight}%)\n"
+            detailed = item.get('detailed_rubric')
+            if detailed and isinstance(detailed, dict) and any(detailed.values()):
+                for level, desc in detailed.items():
+                    if desc: text += f"  * {level}: {desc}\n"
+            else:
+                text += f"  要求: {item.get('description', '')}\n"
+        return text
+
     def evaluate_code(self, submission, docker_report, project_path=None):
         """
-        🚀 核心精进逻辑：事实对齐 (Docker) + 路径走查 (AI)
+        🚀 核心评分逻辑：实现双轨制数据生成
+        1. 详细维度分 (scores) -> 对应 Rubric 配置
+        2. 统计映射分 (stats_scores) -> 对应系统固定 Logic/Design/Style
         """
         is_java = submission.file.name.endswith(('.java', '.zip'))
         lang_name = "Java" if is_java else "Python"
 
-        # 1. 获取源码内容
+        # 1. 获取源代码
         if submission.sub_type == 'archive' and project_path:
             source_code = self._read_project_source(project_path)
         else:
             try:
-                # 兼容处理：优先读取文件系统，失败则返回提示
                 with open(submission.file.path, 'r', encoding='utf-8', errors='ignore') as f:
                     source_code = f.read()
             except:
-                source_code = "无法读取源代码，请检查文件存取权限"
+                source_code = "无法读取源代码内容"
 
-        # 2. 准备 RAG 知识库上下文
+        # 2. 准备上下文与 Rubric 配置
         contexts = self.get_rag_contexts(submission)
+        rubric_config = submission.assignment.rubric_config
+        custom_dim_names = [i.get('criterion') for i in rubric_config.get('items', [])] if rubric_config.get(
+            'items') else ["Logic", "Design", "Style"]
 
-        # 3. 构造沙箱事实事实证据（方案一核心）
-        # 区分编译失败 (compile_status=False) 和 运行时异常
+        # 3. 构造沙箱事实证据
         if not docker_report.compile_status:
             sandbox_evidence = f"🚨 编译失败：代码未能通过编译。\n错误堆栈：\n{docker_report.stderr}"
         else:
             sandbox_evidence = f"✅ 编译成功，运行输出如下：\nSTDOUT: {docker_report.stdout or '空'}\nSTDERR: {docker_report.stderr or '无'}"
 
-        # 4. 构造深度评审 Prompt（方案三核心）
+        # 4. 构造深度评审 Prompt
         prompt = f"""
-        你是一名严谨的 {lang_name} 编程导师。请对学生的作业进行【沙箱事实对齐】与【源码逻辑深度走查】。
+        你是一名严谨的 {lang_name} 编程导师。请对学生的作业进行评审。
 
         ### 1. 运行事实背景：
         {sandbox_evidence}
 
-        ### 2. 评审维度与考点 (RAG 知识库)：
-        【L1-系统通用规范】：
-        {contexts['l1']}
-        【L2-课程专项能力】：
-        {contexts['l2']}
-        【L3-本题核心业务逻辑】：
-        {contexts['l3']}
+        ### 2. 严格评分标准 (Layer 3 - 核心依据)：
+        {self._build_rubric_description(rubric_config)}
 
-        ### 3. 学生源码内容：
+        ### 3. 辅助参考考点 (Layer 1 & 2)：
+        - 系统规范: {contexts['l1']}
+        - 课程能力: {contexts['l2']}
+
+        ### 4. 学生源码内容：
         {source_code}
 
-        ### 4. 评审核心指令：
-        1. **事实对齐**：参考沙箱事实。若编译失败，请在源码中精准定位语法错误；若运行成功，核对输出是否符合预期。
-        2. **逻辑走查**：这是半开放作业。即使代码运行报错或无输出，你也必须模拟执行所有逻辑路径。
-        3. **宽严相济 (人道主义)**：若代码逻辑实现度高，仅因微小语法错误（如漏写分号、大小写）导致编译失败，不得判 0 分，应在 Logic 维度保留大部分得分。
-        4. **知识点穿透**：严格对照 L2 知识点列表，评估掌握程度。
+        ### 5. 评审核心指令：
+        1. **详细评分 (scores)**：返回 JSON 的 "scores" 字典中，Key 必须完全匹配老师定义的维度列表: {custom_dim_names}。必须严格参考 Layer 3 中的 F-HD 等级细则进行判定。
+        2. **统计映射 (stats_scores)**：为了系统统计，请务必将上述评审结果映射归类到以下 3 个固定指标 (0-100分)：
+           - Logic: 业务逻辑正确性、功能完成度、编译事实。
+           - Design: 架构设计、OOP 原则应用、类关系。
+           - Style: 命名规范、注释、代码整洁度。
+        3. **知识点画像 (kp_scores)**：必须严格匹配以下列表评估掌握度: {contexts['allowed_labels']}。
 
-        注意：kp_scores 的 Key 必须严格匹配以下列表，不得自行生成：
-        {contexts['allowed_labels']}
-
-        请直接返回 JSON：
+        请严格返回以下格式的 JSON：
         {{
-            "scores": {{ "Logic": 分数, "Design": 分数, "Style": 分数 }},
-            "kp_scores": {{ "知识点名称": 分数 }},
+            "scores": {{ "维度名": 分数 }},
+            "stats_scores": {{ "Logic": 分数, "Design": 分数, "Style": 分数 }},
+            "kp_scores": {{ "知识点名": 分数 }},
             "total_score": 总分,
-            "feedback": "## 运行诊断 \n... ## 逻辑建议 \n..."
+            "feedback": "## 运行诊断 \\n... ## 逻辑建议 \\n... (使用中文回复)"
         }}
         """
+
         start_time = time.time()
         try:
             response = self.client.chat.completions.create(
                 model="deepseek-chat",
                 messages=[
-                    {"role": "system", "content": "你是一个严谨的编程导师，只输出结构化的 JSON 数据。"},
+                    {"role": "system",
+                     "content": "你是一个严谨的编程评审导师，只输出结构化的 JSON 数据。所有评价使用中文。"},
                     {"role": "user", "content": prompt}
                 ],
                 response_format={'type': 'json_object'}
             )
 
-            # 流量监控
+            # 监控日志
             duration = time.time() - start_time
             if response.usage:
                 AIServiceLog.objects.create(
-                    service_name='deepseek',
-                    endpoint='chat.completions/evaluate',
-                    prompt_tokens=response.usage.prompt_tokens,
-                    completion_tokens=response.usage.completion_tokens,
-                    total_tokens=response.usage.total_tokens,
-                    response_time=duration,
-                    status_code=200
+                    service_name='deepseek', endpoint='chat.completions/evaluate',
+                    prompt_tokens=response.usage.prompt_tokens, completion_tokens=response.usage.completion_tokens,
+                    total_tokens=response.usage.total_tokens, response_time=duration, status_code=200
                 )
             return json.loads(response.choices[0].message.content)
         except Exception as e:
-            # 失败记录
             duration = time.time() - start_time
-            AIServiceLog.objects.create(
-                service_name='deepseek',
-                endpoint='chat.completions/evaluate',
-                response_time=duration,
-                status_code=500
-            )
-            # 异常向上抛出，由 GradingPipeline 捕获并处理状态
+            AIServiceLog.objects.create(service_name='deepseek', endpoint='chat.completions/evaluate',
+                                        response_time=duration, status_code=500)
             raise Exception(f"AI 评审引擎通信失败: {str(e)}")
 
     def get_rag_contexts(self, submission):
-        """
-        静默 RAG 检索逻辑
-        """
+        """静默 RAG 检索逻辑"""
         assignment = submission.assignment
         is_java = submission.file.name.endswith(('.java', '.zip'))
         lang_filter = 'java' if is_java else 'python'
-
-        # 检索系统级及本课程相关的知识点
-        kp_query = KnowledgePoint.objects.filter(
-            Q(is_system=True) | Q(course=assignment.course),
-            language__icontains=lang_filter
-        )
-
+        kp_query = KnowledgePoint.objects.filter(Q(is_system=True) | Q(course=assignment.course),
+                                                 language__icontains=lang_filter)
         l1, l2, allowed = "", "", []
         for kp in kp_query:
             allowed.append(kp.name)
@@ -215,14 +209,6 @@ class AIScorer:
                 l1 += detail
             else:
                 l2 += detail
-
-        # 注入 Layer 3 业务逻辑
         task_points = "\n".join(
             [f"- {p}" for p in assignment.reference_logic]) if assignment.reference_logic else "常规业务实现"
-
-        return {
-            'l1': l1 or "遵循标准编码规范",
-            'l2': l2 or "掌握课程核心目标",
-            'l3': task_points,
-            'allowed_labels': allowed
-        }
+        return {'l1': l1 or "遵循标准规范", 'l2': l2 or "掌握课程目标", 'l3': task_points, 'allowed_labels': allowed}

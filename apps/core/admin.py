@@ -99,26 +99,20 @@ class AssignmentAdmin(admin.ModelAdmin):
 
 @admin.register(AIEvaluation)
 class AIEvaluationAdmin(admin.ModelAdmin):
-    # 🚀 优化点：增加 kp_scores 显示
-    list_display = ('submission_id', 'get_student', 'total_score', 'is_published', 'teacher_reviewed', 'created_at')
-    list_filter = ('is_published', 'teacher_reviewed', 'total_score')
+    list_display = ('submission_id', 'total_score', 'ai_raw_score', 'is_published', 'created_at')
 
     fieldsets = (
-        ('关联信息', {
-            'fields': ('submission', 'created_at')
-        }),
+        ('关联信息', {'fields': ('submission', 'created_at')}),
         ('AI 维度评分 & 知识点得分', {
-            'fields': ('scores', 'kp_scores', 'raw_sandbox_output'),
+            'fields': ('scores', 'ai_raw_score', 'ai_raw_feedback', 'kp_scores', 'raw_sandbox_output'),
         }),
-        ('老师裁定 & 反馈', {
-            'fields': ('total_score', 'feedback', 'is_published', 'teacher_reviewed'),
-        }),
-        ('AI 原始响应 (仅供调试)', {
-            'fields': ('raw_response',),
-            'classes': ('collapse',),
-        }),
+        ('老师裁定 & 反馈', {'fields': ('total_score', 'feedback', 'is_published', 'teacher_reviewed')}),
+        ('AI 原始响应', {'fields': ('raw_response',), 'classes': ('collapse',)}),
     )
-    readonly_fields = ('submission', 'created_at', 'raw_response', 'scores', 'kp_scores', 'raw_sandbox_output')
+
+    readonly_fields = (
+    'submission', 'created_at', 'raw_response', 'scores', 'ai_raw_score', 'ai_raw_feedback', 'kp_scores',
+    'raw_sandbox_output')
 
     @admin.display(description='学生')
     def get_student(self, obj):

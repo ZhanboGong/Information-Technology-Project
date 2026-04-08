@@ -11,13 +11,10 @@ from .ai_scorer import AIScorer
 
 class GradingPipeline:
     """
-    Automatic correction pipeline center control class.
-    This class is responsible for coordinating the full lifecycle processing of student submissions, including:
-    1. State locking: Prevents concurrent conflicts.
-    2. Sandbox run: Use DockerRunner to capture the actual code run data (stdout/exit_code).
-    3. AI Evaluation: Combined with the running results, AIScorer is used for semantic analysis and scoring.
-    4. Grade alignment: automatic grade brushing logic is implemented to ensure that all historical submissions of students for this assignment are synchronized to the highest grade.
+    自动化批改流水线核心控制类。
+    负责协调 Docker 沙箱运行、AI 语义评分以及成绩同步。
     """
+
     def __init__(self, submission_id):
         try:
             self.submission = Submission.objects.get(id=submission_id)
@@ -28,44 +25,30 @@ class GradingPipeline:
 
     def run_full_pipeline(self, entry_point=None, work_dir=None):
         """
-        Implement a complete automated correction pipeline.
-        This method links the process from running the code to scoring the AI, and is responsible for maintaining the state machine of the Submission.
-        The execution flow is as follows:
-        1. Update the state to 'running' to lock the task.
-        2. Call the Docker runtime to capture the output.
-        3. Invoke the AI scoring system to generate feedback and synchronize the highest score.
-        If anything goes wrong, mark the status as 'failed' and throw an exception.
-        :param entry_point: The path to the specified program entry file.
-        :param work_dir: Path to the temporary working directory in which the project will be unpacked.
-        :return: None: The result is persisted directly to the database
+        执行完整的自动化批改流程。
         """
-        print(f"--- Start the background marking: Submission {self.submission.id} ---")
+        print(f"--- 启动自动化批改流水线: Submission {self.submission.id} ---")
 
-        # State locking: Update the database state to prevent duplicate scheduling in the frontend or background
+        # 状态锁定：防止重复执行
         self.submission.status = 'running'
         self.submission.save(update_fields=['status'])
 
         try:
-            # Phase 1: Docker running
+            # 第一阶段：Docker 沙箱运行获取事实证据
             docker_report = self.run_stage_one_docker(entry_point, work_dir)
 
-            # Phase 2: The AI score is synchronized with the score value
+            # 第二阶段：AI 语义评分与数据持久化
             self.run_stage_two_ai(docker_report, work_dir)
 
         except Exception as e:
-            print(f"Error: Pipeline crash: {str(e)}")
+            print(f"流水线执行失败: {str(e)}")
             self.submission.status = 'failed'
             self.submission.save(update_fields=['status'])
             raise e
 
     def run_stage_one_docker(self, entry_point=None, work_dir=None):
         """
-        Phase 1: Docker runs fact capture.
-        Executing student submitted code or project in a restricted sandbox environment, capturing raw data (standard output, exit code, etc.) at runtime
-        And save these "facts" to the DockerReport model for reference in the subsequent AI scoring stage.
-        :param entry_point: The path to the project's entry point file
-        :param work_dir: Path to the root directory of the extracted project.
-        :return: The saved run report instance
+        第一阶段：通过 DockerRunner 捕获代码运行的真实数据。
         """
         target_file = entry_point if entry_point else self.submission.file.path
         docker_res = self.runner.run_code(
@@ -86,66 +69,67 @@ class GradingPipeline:
 
     def run_stage_two_ai(self, docker_report, work_dir=None):
         """
-        Phase 2: Perform AI semantic scoring and perform full grade alignment.
-        This method contains the following core logic:
-        1. Call AI interface: Intelligent scoring combined with code execution facts (DockerReport).
-        2. Data persistence: Save AI rating details, itemized scores, and teacher feedback.
-        3. Grade Alignment (core) : Calculate the highest grade of all the historical submissions of the student for the assignment and perform a "brush" synchronization.
-        Ensure that the final_score field is consistent for all associated submissions to address historical score lag issues.
-        :param docker_report: The container run report instance generated in the first phase
-        :param work_dir: A temporary working directory where the project source code resides.
-        :return: The results are persisted to the database.
+        第二阶段：调用 AI 引擎评分，并严格对齐 AIEvaluation 模型字段。
         """
-
-        # Start atomic database transactions to ensure that score saving and synchronization with the highest score are either all successful or all rolled back
         with transaction.atomic():
-            # Call the AI rater: semantic analysis, knowledge matching, and feedback generation
+            # 1. 调用 AI 获取结构化评审数据
             eval_data = self.scorer.evaluate_code(self.submission, docker_report, project_path=work_dir)
 
-            # Safe conversion: Convert the scores returned by the AI to Decimal, ensuring precision and preventing non-numeric exceptions
+            # 分数精度转换
             try:
                 raw_val = eval_data.get('total_score', 0)
                 current_score = Decimal(str(raw_val))
             except Exception:
                 current_score = Decimal('0.00')
 
-            # 1. Save/update a detailed review of this submission
+            # 2. 影子存储逻辑：分离统计分与详细分
+            # stats_scores (Logic/Design/Style) 存入 scores 字段，对接数据分析图表
+            stats_scores = eval_data.get('stats_scores', {"Logic": 0, "Design": 0, "Style": 0})
+
+            # 老师定义的详细维度分 (如 Parts 1-7) 存入 ai_raw_feedback 字段
+            detailed_scores_json = json.dumps(eval_data.get('scores', {}), ensure_ascii=False)
+
             log_content = str(docker_report.stdout) if docker_report.stdout else "无运行日志"
+
+            # 3. 严格对齐模型字段持久化数据
             AIEvaluation.objects.update_or_create(
                 submission=self.submission,
                 defaults={
-                    'raw_response': json.dumps(eval_data, ensure_ascii=False),
-                    'raw_sandbox_output': f"EXIT_{docker_report.exit_code} | LOGS: {log_content}",
-                    'scores': eval_data.get('scores', {}),
-                    'kp_scores': eval_data.get('kp_scores', {}),
+                    # 基础得分字段
                     'total_score': current_score,
                     'feedback': eval_data.get('feedback', "AI 评审未生成内容"),
+
+                    # 关键修复：显式填充模型中的原始评分字段
+                    'ai_raw_score': current_score,  # 存入 ai_raw_score
+                    'ai_raw_feedback': detailed_scores_json,  # 存入 ai_raw_feedback
+
+                    # 结构化评分字段
+                    'scores': stats_scores,  # 存入维度得分 (用于统计)
+                    'kp_scores': eval_data.get('kp_scores', {}),
+
+                    # 证据备份
+                    'raw_response': json.dumps(eval_data, ensure_ascii=False),
+                    'raw_sandbox_output': f"EXIT_{docker_report.exit_code} | LOGS: {log_content}",
                     'is_published': True
                 }
             )
 
-            # 2. Core logic: Retrieve all of the student's historical submissions for the current assignment and find the highest score
-            print(f"🔍 正在检索全量历史成绩...")
+            # 4. 全量成绩对齐（刷分逻辑）：确保 Submission 表中的 final_score 始终为历史最高分
+            print(f"正在同步历史最高分记录...")
             aggregate_res = AIEvaluation.objects.filter(
                 submission__student=self.submission.student,
                 submission__assignment=self.submission.assignment
             ).aggregate(max_val=Max('total_score'))
 
-            # Get the highest score in history (or the current score if this is the first commit)
-            highest_score = aggregate_res.get('max_val')
-            if highest_score is None:
-                highest_score = current_score
+            highest_score = aggregate_res.get('max_val') or current_score
 
-            # 3. Synchronous flush logic:
-            # Update ' all '  of the student's submissions for that assignment to align final_score to the highest score.
-            # This design ensures that the score displayed on the student side is always the "highest score so far".
             Submission.objects.filter(
                 student=self.submission.student,
                 assignment=self.submission.assignment
             ).update(final_score=highest_score)
 
-            # 4. Update the current commit pipeline status to "completed"
+            # 更新当前提交状态为完成
             self.submission.status = 'completed'
             self.submission.save(update_fields=['status'])
 
-            print(f"Processing done! Score: {current_score}, global highest aligned: {highest_score}")
+            print(f"批改完成! 当前得分: {current_score}, 同步最高分: {highest_score}")
