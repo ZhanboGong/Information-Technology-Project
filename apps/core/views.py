@@ -1,4 +1,6 @@
 import os
+import zipfile
+import io
 import uuid
 import shutil
 import pandas as pd
@@ -6,10 +8,16 @@ import traceback
 from django.conf import settings
 from django.db import transaction
 from django.contrib.auth.hashers import make_password
+from django.http import FileResponse, HttpResponse
+from django.utils import timezone
+from datetime import timedelta
+from django.utils.encoding import escape_uri_path
+from django.db.models import Max
 from rest_framework import viewsets, permissions, status, serializers
 from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView
-from rest_framework.decorators import action
+from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
 
 # Import the model and serializer
 from .models import User, Course, Assignment, Submission, AIEvaluation, KnowledgePoint
@@ -22,6 +30,63 @@ from .serializers import (
 from .utils.ai_scorer import AIScorer
 from .utils.project_analyzer import ProjectAnalyzer
 
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_global_assignment_reminders(request):
+    """
+    Get the assessment deadline warning on the student's dashboard page.
+
+    This interface is dedicated to the dashboard page display, and the logic is as follows:
+    1. Role filtering: Perform only for users whose role is 'student'.
+    2. Time window: Filter the assessments that are due in the next 7 days (within a week) from the current time.
+    3. Status filtering: Automatically excludes assignments that students have submitted successfully or are in process, and only keeps "to be done" tasks.
+    4. Urgency: Results are sorted in ascending order by deadline (most urgent first).
+    :param request: DRF request object, which should contain the authenticated user instance.
+    :return: A list containing alert details. If there is no reminder or the user is not a student, an empty list is returned.
+    """
+    user = request.user
+    # Only the student role needs to be reminded
+    if user.role != 'student':
+        return Response([])
+
+    now = timezone.now()
+    one_week_later = now + timedelta(days=7)
+
+    # 1. Find all assignments that are due within a week for a student's chosen course
+    upcoming_assignments = Assignment.objects.filter(
+        course__students=user,
+        deadline__range=(now, one_week_later)
+    ).select_related('course')  # 使用 select_related 优化查询
+
+    reminders = []
+    for assignment in upcoming_assignments:
+        # 2. Check if the student already has a "done" or "in progress" submission for the assignment
+        has_submitted = Submission.objects.filter(
+            student=user,
+            assignment=assignment
+        ).exclude(status='failed').exists()
+
+        if not has_submitted:
+            time_delta = assignment.deadline - now
+            days_left = time_delta.days
+
+            hours_left = int(time_delta.total_seconds() // 3600)
+
+            reminders.append({
+                "assignment_id": assignment.id,
+                "title": assignment.title,
+                "course_name": assignment.course.name,
+                "deadline": assignment.deadline,
+                "days_left": days_left,
+                "hours_left": hours_left,
+                "category": assignment.category
+            })
+
+    # Sort by urgency (closest deadline first)
+    reminders.sort(key=lambda x: x['deadline'])
+
+    return Response(reminders)
 
 # Identity verification and permissions
 
@@ -182,6 +247,67 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
             return Response({"error": "AI 返回格式异常，请稍后再试"}, status=500)
         except Exception as e:
             return Response({"error": f"AI 生成失败: {str(e)}"}, status=500)
+
+    @action(detail=False, methods=['get'], url_path='download-submission')
+    def download_single_submission(self, request):
+        """
+        下载单个指定的提交文件，并以学号命名
+        URL: /api/teacher/assignments/download-submission/?submission_id=1
+        """
+        submission_id = request.query_params.get('submission_id')
+        if not submission_id:
+            return Response({"error": "缺少 submission_id 参数"}, status=400)
+
+        try:
+            # 确保老师只能下载自己课程下的提交
+            submission = Submission.objects.get(id=submission_id, assignment__teacher=request.user)
+            file_handle = submission.file.open()
+
+            # 获取原始文件后缀
+            ext = os.path.splitext(submission.file.name)[1]
+            # 新文件名：学号_姓名_作业标题.后缀
+            filename = f"{submission.student.student_id_num}_{submission.student.first_name}_{submission.assignment.title}{ext}"
+
+            response = FileResponse(file_handle, content_type='application/octet-stream')
+            # 使用 escape_uri_path 解决中文文件名乱码问题
+            response['Content-Disposition'] = f"attachment; filename*=utf-8''{escape_uri_path(filename)}"
+            return response
+        except Submission.DoesNotExist:
+            return Response({"error": "未找到相关提交记录或无权访问"}, status=404)
+
+    @action(detail=True, methods=['get'], url_path='download-all')
+    def download_all_submissions(self, request, pk=None):
+        """
+        批量下载某个作业的所有学生最新提交，并打包成 ZIP
+        URL: /api/teacher/assignments/{id}/download-all/
+        """
+        assignment = self.get_object()
+        # 获取该作业下每个学生的最后一次提交
+        # 注意：这里假设同一学生多次提交时只下载最新的一份
+        from django.db.models import Max
+        latest_submissions_ids = Submission.objects.filter(assignment=assignment).values('student').annotate(
+            latest_id=Max('id')).values_list('latest_id', flat=True)
+        submissions = Submission.objects.filter(id__in=latest_submissions_ids)
+
+        if not submissions.exists():
+            return Response({"error": "暂无任何提交记录"}, status=404)
+
+        # 在内存中创建 ZIP 文件
+        byte_io = io.BytesIO()
+        with zipfile.ZipFile(byte_io, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for sub in submissions:
+                if sub.file and os.path.exists(sub.file.path):
+                    ext = os.path.splitext(sub.file.name)[1]
+                    # ZIP 内的文件命名：学号_姓名.后缀
+                    arc_name = f"{sub.student.student_id_num}_{sub.student.first_name}{ext}"
+                    zip_file.write(sub.file.path, arcname=arc_name)
+
+        byte_io.seek(0)
+        zip_filename = f"{assignment.title}_全部提交.zip"
+
+        response = HttpResponse(byte_io, content_type='application/zip')
+        response['Content-Disposition'] = f"attachment; filename*=utf-8''{escape_uri_path(zip_filename)}"
+        return response
 
 
 class KnowledgePointViewSet(viewsets.ReadOnlyModelViewSet):
