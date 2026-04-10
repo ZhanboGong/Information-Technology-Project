@@ -1,26 +1,50 @@
 import os
 import zipfile
 import re
+import shutil
 
 
 class ProjectAnalyzer:
+    """
+    Multi-file project structure analyzer.
+
+    This class is responsible for extracting the uploaded ZIP archive, normalizing it, and using "heuristic regular matching + AI semantic analysis".
+    Is a dual mechanism that automatically identifies the Entry Point of a program in a complex directory tree.
+
+    Attributes:
+        ai_client: AI client for decision aid (like AIScorer instance).
+    """
     def __init__(self, ai_client=None):
         self.ai_client = ai_client
 
     def unzip_project(self, zip_path, extract_path):
         """
-        Extract the specified ZIP archive into the destination directory.
-        This method automatically checks to see if the desired directory exists and recursively creates it if not.
-        If encounter a corrupted file or path during the decompression process, an exception will be caught and thrown upward.
-        :param zip_path: The full path to the ZIP file to be extracted
-        :param extract_path: Path to the unzipped file
-        :return: No return value
+        Unzip the project archive and recursively perform directory tiling.
+
+        This method automatically handles common "folder nesting" issues (e.g., students packing entire folders when compressing, resulting in
+        Redundant top-level directories after unzipping). It will ensure that the core content of the project (such as the src directory or main file)
+        Is promoted to the first level of the decompression path.
+        :param zip_path: ZIP file's physical path
+        :param extract_path: Target unzipped directory.
+        :return:
         """
         if not os.path.exists(extract_path):
             os.makedirs(extract_path, exist_ok=True)
         try:
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(extract_path)
+
+            # --- Recursive tiling: Make sure the src directory is on the first level of extract_path ---
+            while True:
+                content = [f for f in os.listdir(extract_path) if
+                           not f.startswith('__MACOSX') and not f.startswith('.')]
+                if len(content) == 1 and os.path.isdir(os.path.join(extract_path, content[0])):
+                    nested_folder = os.path.join(extract_path, content[0])
+                    for item in os.listdir(nested_folder):
+                        shutil.move(os.path.join(nested_folder, item), extract_path)
+                    os.rmdir(nested_folder)
+                else:
+                    break
             print(f"Unzip completed: {extract_path}")
         except Exception as e:
             print(f"Unzip failed: {str(e)}")
@@ -28,39 +52,33 @@ class ProjectAnalyzer:
 
     def heuristic_detect(self, project_path):
         """
-        Possible program entry files are automatically identified by scanning the project directory with heuristic rules.
-        This method recursively traverses the project folder and uses regular expressions to match the Python and Java startup features:
-        - Python: matches the 'if __name__ == "__main__":' struct.
-        - Java: matches' public static void main(String[] args) 'method signature.
-        :param project_path: Path to the root of the project to scan.
-        :return: list -Contains a list of relative paths to all suspected entry files
+        Heuristic Entry Detection with Regular Expressions.
+
+        By scanning the source code for specific flags:
+        - Python: Look for the 'if __name__ == "__main__":' struct.
+        - Java: Find the 'public static void main(String[] args)' method.
+        :param project_path: Project root
+        :return: List of all candidate entry file relative paths found.
         """
         candidates = []
-        # Define entry feature regularities: match standard entry judgment statements
         py_entry_patterns = [r'if\s+__name__\s*==\s*["\']__main__["\']\s*:']
         java_main_pattern = r'public\s+static\s+void\s+main\s*\('
 
         for root, _, files in os.walk(project_path):
             for file in files:
                 path = os.path.join(root, file)
-                # Get the path relative to the project root and replace the Windows backslashes uniformly with forward slashes
                 rel_path = os.path.relpath(path, project_path).replace("\\", "/")
-
-                # Entry identification logic
                 if file.endswith('.py'):
                     try:
                         with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                            content = f.read()
-                            if any(re.search(p, content) for p in py_entry_patterns):
+                            if any(re.search(p, f.read()) for p in py_entry_patterns):
                                 candidates.append(rel_path)
                     except:
                         pass
-
                 elif file.endswith('.java'):
                     try:
                         with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                            content = f.read()
-                            if re.search(java_main_pattern, content):
+                            if re.search(java_main_pattern, f.read()):
                                 candidates.append(rel_path)
                     except:
                         pass
@@ -68,74 +86,50 @@ class ProjectAnalyzer:
 
     def ai_assist_detect(self, project_path, candidates, task_context=None):
         """
-        AI semantic analysis is used to accurately locate the core business entrance from multiple candidate entrances.
-        When a heuristic scan finds multiple files containing the main method (e.g., both test class, Demo class, and business main class),
-        This method reads the first 30 lines of code snippets of each candidate file and sends them to AI for intelligent judgment combined with the background context of the topic.
-        :param project_path: Project root directory path
-        :param candidates: List of candidate entry paths obtained by heuristic detection
-        :param task_context: A background description of the current job or task that helps the AI understand the business logic
-        :return:
+        AI is used to assist the "authenticity" discrimination of entry points.
+
+        When a project has multiple entries (e.g., multiple test classes with main methods),
+        This method sends the code snippet of each candidate file to the AI, combined with the task_context.
+        Decide which one is the real entry point to the business logic.
+        :param project_path: Project path.
+        :param candidates: The list of candidates detected by the heuristic
+        :param task_context: The description of the task or the background of the test point to help the AI improve the accuracy of the judgment.
+        :return: Optimal entry file path determined by AI.
         """
         if not self.ai_client:
             return candidates[0] if candidates else None
 
-        # Enhancement: Read the first 30 lines of each candidate to assess "Logic Density"
+        # It is preferred to exclude Main.java because it is usually an empty file generated by the IDE
+        filtered_candidates = [c for c in candidates if "Main.java" not in c]
+        if not filtered_candidates: filtered_candidates = candidates
+
         candidate_snippets = ""
-        for path in candidates[:5]:  # Analyze up to 5 candidates
+        for path in filtered_candidates[:5]:
             try:
                 full_path = os.path.join(project_path, path)
                 with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    lines = f.readlines()[:30]
-                    snippet = "".join(lines)
+                    snippet = "".join(f.readlines()[:30])
                     candidate_snippets += f"\n--- FILE: {path} ---\n{snippet}\n"
             except:
                 continue
 
         prompt = f"""
-        You are a Software Architect. Multiple entry points (main methods) have been detected in the project. 
-        Your task is to identify the "Real Business Logic Entry Point" via semantic analysis.
-
-        [Task Context & Requirements]:
-        {task_context}
-
-        [Candidate File Snippets]:
-        {candidate_snippets}
-
-        [Decision Criteria]:
-        1. EXCLUDE simple test cases, demos, or "Hello World" style boilerplate (e.g., a Main.java that only prints a welcome message).
-        2. IDENTIFY the file most closely related to the task context (e.g., systems for Person, Ride, or Employee management).
-        3. You MUST select and return EXACTLY ONE path from the candidate list provided above.
-
-        [Output Constraint]:
-        - DO NOT provide any explanation or conversational text.
-        - Return ONLY the raw file path string.
-
-        Resulting Path:
+        You are a Software Architect. Identify the "Real Business Logic Entry Point" from these candidates.
+        [Context]: {task_context}
+        [Files]: {candidate_snippets}
+        [Constraint]: Return ONLY the raw file path string.
         """
         response = self.ai_client.ask(prompt).strip()
-        # Clear the path again to prevent the AI from talking too much or returning to markdown format
-        clean_path = response.replace('`', '').split('\n')[0].strip()
-        return clean_path
+        return response.replace('`', '').split('\n')[0].strip()
 
     def get_entry_point(self, project_path, task_context=None):
         """
-        Get the project launch entry file path (external unified interface).
-        The entry is located through a two-layer mechanism of "heuristic scanning + AI semantic arbitration" :
-        1. First do a quick scan with regular rules.
-        2. If the scan results are ambiguous (multiple candidates) or potentially false positives (e.g., generic Main.java),
-        Ai-assisted analysis is initiated to ensure accuracy.
-        :param project_path: The absolute path to the project root
-        :param task_context: A description of the task context to help AI understand the business logic
-        :return:
-            str: Identified entry file relative path
-            None: If no eligible entry file is found
+        The main entrance of the integrated identification project.
+
+        A complete pipeline for integrating heuristic scanning with AI arbitration. This is the core method called by the Pipeline.
+        :return: The final entry path, returning None if not found.
         """
-
         candidates = self.heuristic_detect(project_path)
-
-        if not candidates:
-            return None
-        if len(candidates) == 1 and "Main.java" not in candidates[0]:
-            return candidates[0]
-
+        if not candidates: return None
+        # If there are multiple entries, ask the AI to arbitrate instead of simply returning
         return self.ai_assist_detect(project_path, candidates, task_context)
