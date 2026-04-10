@@ -251,54 +251,70 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'], url_path='download-submission')
     def download_single_submission(self, request):
         """
-        下载单个指定的提交文件，并以学号命名
-        URL: /api/teacher/assignments/download-submission/?submission_id=1
+        Download specific individual student submissions.
+
+        The interface implements automatic renaming logic: the original messy filename is converted to the standard format of "student_name_assignment title".
+        It is greatly convenient for teachers to archive and organize after downloading.
+
+        Permissions and Security:
+            - Force a 'assignment__teacher=request.user' check to make sure teachers can only download student work from their own course.
+            - Use 'escape_uri_path' to make sure Chinese filenames don't get messy in Chrome/Firefox etc.
+        :param request: DRF request object. You need to include the 'submission_id' in query_params.
+        :return:
+            FileResponse: Binary file stream
+            Response: 400 (parameter missing) or 404 (record does not exist/has no access)
         """
         submission_id = request.query_params.get('submission_id')
         if not submission_id:
             return Response({"error": "缺少 submission_id 参数"}, status=400)
 
         try:
-            # 确保老师只能下载自己课程下的提交
+            # Permission isolation query: Check the teacher of the assignment across the table by double underscores
             submission = Submission.objects.get(id=submission_id, assignment__teacher=request.user)
             file_handle = submission.file.open()
 
-            # 获取原始文件后缀
+            # Construct a normalized download filename
             ext = os.path.splitext(submission.file.name)[1]
-            # 新文件名：学号_姓名_作业标题.后缀
+            # Format: Student number _ name _ assignment title. Extensions
             filename = f"{submission.student.student_id_num}_{submission.student.first_name}_{submission.assignment.title}{ext}"
-
+            # 3. Build the file response object
             response = FileResponse(file_handle, content_type='application/octet-stream')
-            # 使用 escape_uri_path 解决中文文件名乱码问题
+            # RFC 5987: Use the filename*=utf-8 "syntax for non-ASCII filenames
             response['Content-Disposition'] = f"attachment; filename*=utf-8''{escape_uri_path(filename)}"
             return response
         except Submission.DoesNotExist:
-            return Response({"error": "未找到相关提交记录或无权访问"}, status=404)
+            return Response({"error": "No relevant commit record was found or access was not granted"}, status=404)
 
     @action(detail=True, methods=['get'], url_path='download-all')
     def download_all_submissions(self, request, pk=None):
         """
-        批量下载某个作业的所有学生最新提交，并打包成 ZIP
-        URL: /api/teacher/assignments/{id}/download-all/
+        Download the latest submission of all students under a given assignment in bulk and package it as ZIP.
+
+        Business logic:
+        1. Deduplicate: Use Django's 'Max('id')' aggregation function to filter out each student's "last" submission for that assignment.
+        2. Memory compression: Using 'IO. BytesIO' to complete the compression process in memory, does not occupy disk IO, and has fast response time.
+        3. Structural reorganization: In the ZIP package, the files are renamed to the "student number _ name" format, which is convenient for bulk import into other scoring software or archiving.
+        :param request: DRF request object.
+        :param pk: The ID of the target job.
+        :return: Contains the response in a ZIP archive.
         """
         assignment = self.get_object()
-        # 获取该作业下每个学生的最后一次提交
-        # 注意：这里假设同一学生多次提交时只下载最新的一份
+        # Get the last submission for each student under that assignment
         from django.db.models import Max
         latest_submissions_ids = Submission.objects.filter(assignment=assignment).values('student').annotate(
             latest_id=Max('id')).values_list('latest_id', flat=True)
         submissions = Submission.objects.filter(id__in=latest_submissions_ids)
 
         if not submissions.exists():
-            return Response({"error": "暂无任何提交记录"}, status=404)
+            return Response({"error": "There is no record of submission"}, status=404)
 
-        # 在内存中创建 ZIP 文件
+        # Create a ZIP file in memory
         byte_io = io.BytesIO()
         with zipfile.ZipFile(byte_io, 'w', zipfile.ZIP_DEFLATED) as zip_file:
             for sub in submissions:
                 if sub.file and os.path.exists(sub.file.path):
                     ext = os.path.splitext(sub.file.name)[1]
-                    # ZIP 内的文件命名：学号_姓名.后缀
+                    # ZIP file name: Student number _ Name. Suffix
                     arc_name = f"{sub.student.student_id_num}_{sub.student.first_name}{ext}"
                     zip_file.write(sub.file.path, arcname=arc_name)
 
