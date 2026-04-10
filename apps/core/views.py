@@ -702,18 +702,35 @@ class StudentSubmissionViewSet(viewsets.ModelViewSet):
 
 
 class UserProfileViewSet(viewsets.GenericViewSet):
+    """
+    User profile management view set.
+
+    This set of views allows logged-in users to manage their own information without involving the actions of other users.
+    CRUD (personal GET/PUT/PATCH) provided via custom actions
+    And a separate interface to change passwords.
+
+    Permission Restrictions:
+        - Logged-in users only (IsAuthenticated).
+    """
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = UserProfileSerializer
 
     @action(detail=False, methods=['get', 'put', 'patch'], url_path='me')
     def manage_me(self, request):
-        """获取或更新当前登录用户的信息"""
+        """
+        Gets or updates information about the currently logged-in user.
+
+        user automatically locates the current user without passing an ID through the URL.
+        As a result, privacy and security are enhanced. GET details (GET) and partial/complete updates (PUT/PATCH) are supported.
+        :param request: DRF request object.
+        :return: A dictionary containing the user's profile
+        """
         instance = request.user
         if request.method == 'GET':
             serializer = self.get_serializer(instance)
             return Response(serializer.data)
 
-        # 更新逻辑
+        # Handle update requests: partial updates are supported (partial=True)
         serializer = self.get_serializer(instance, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
@@ -721,16 +738,23 @@ class UserProfileViewSet(viewsets.GenericViewSet):
 
     @action(detail=False, methods=['post'], url_path='change-password')
     def change_password(self, request):
-        """修改密码"""
+        """
+        Safely change the password of the currently logged-in user.
+
+        The standard security process of "Old password validation -> New password setup" is used.
+        Use Django's built-in set_password method to make sure your new password is encrypted with the PBKDF2 algorithm before loading it into the library.
+        :param request: Requests containing 'old_password' and 'new_password'.
+        :return: Success message or 400 error (old password validation failed).
+        """
         serializer = ChangePasswordSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = request.user
 
-        # 校验旧密码
+        # Verify the old password
         if not user.check_password(serializer.data.get('old_password')):
-            return Response({"error": "旧密码错误"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "Old password wrong"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # 设置新密码
+        # Set a new password
         user.set_password(serializer.data.get('new_password'))
         user.save()
-        return Response({"message": "密码修改成功"})
+        return Response({"message": "Password changed successfully"})
