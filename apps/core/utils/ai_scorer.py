@@ -7,14 +7,25 @@ from django.db.models import Q
 from apps.core.models import KnowledgePoint
 from apps.analytics.models import AIServiceLog
 
-# 加载环境变量
+# Loading environment variables
 load_dotenv()
 
 class AIScorer:
+    """
+    Intelligent Code Review Engine Based on DeepSeek Large Model.
+
+    This class integrates the RAG architecture and is responsible for extracting multiple layers of knowledge (Layer 1/2) and job logic (Layer 3) from the database.
+    Combined with the running facts of Docker sandbox, the big model is driven to analyze and score the code submitted by students in multi-dimensional semantics.
+
+    Key features:
+        1. Automated rating and feedback generation (JSON structured output).
+        2. Deep reading of project source code and identification of multiple codes.
+        3. AI service invocation monitoring and Token consumption auditing.
+    """
     def __init__(self):
         """
-        初始化 DeepSeek 客户端。
-        从环境变量读取 API Key 和 Base URL。
+        Initialize the DeepSeek client.
+        Read the API Key and Base URL from the environment variable.
         """
         api_key = os.getenv("DEEPSEEK_API_KEY")
         base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
@@ -25,8 +36,12 @@ class AIScorer:
 
     def ask(self, prompt):
         """
-        通用 AI 问答接口：用于项目分析、入口文件检测等非评分任务。
-        解决 AttributeError: 'AIScorer' object has no attribute 'ask'。
+        A General AI Question Answering Interface.
+
+        It is used to perform auxiliary tasks of non-evaluation classification, such as item structure analysis, main entry location, etc.
+        Built-in AIServiceLog monitoring to record request time and Token consumption.
+        :param prompt: Text of instructions sent to the AI
+        :return: The text returned by AI, or an empty string in the case of an exception.
         """
         start_time = time.time()
         try:
@@ -62,7 +77,14 @@ class AIScorer:
             return ""
 
     def _read_project_source(self, project_path):
-        """深度读取项目源码：支持多级目录遍历"""
+        """
+        Dive into the project source code.
+
+        Recursively iterate through the project directory to identify supported programming language suffixes (Python/Java/C/C++)
+        And try to read the file content through utf-8, gbk and other encoding formats to be compatible with the source code of different operating systems.
+        :param project_path: Path to the temporary workspace after the project is unzipped
+        :return: Concatenated Markdown formatted source text
+        """
         full_source = ""
         supported_exts = ('.py', '.java', '.c', '.cpp')
         for root, _, files in os.walk(project_path):
@@ -84,7 +106,20 @@ class AIScorer:
         return full_source
 
     def _build_rubric_description(self, rubric_config):
-        """解析 L3 动态配置，生成 AI 评审指令文本"""
+        """
+        Parse the Layer 3 dynamic scoring configuration to generate detailed instructions for the AI to read.
+
+        This method converts the JSON scoring criteria stored in the database into Markdown format instruction text.
+        It supports nested parsing of "dimension weights" and "level descriptions (F-HD level specification)".
+
+        Logical flow:
+            1. Config validation: If there is no config, return a general convention recommendation.
+            2. Iterate over dimensions: Extract each rating dimension (e.g. "feature implementation", "code style") and its proportion.
+            3. The level of resolution: if any details of the grade rules (Fail/Pass/Credit/Distinction/High Distinction),
+                Then it is expanded as an accurate scale for AI scoring.
+        :param rubric_config: A rating configuration dictionary containing a list of 'items'.
+        :return: The formatted Markdown string is injected as the core of Prompt.
+        """
         if not rubric_config or 'items' not in rubric_config:
             return "根据通用编程规范评分。"
 
@@ -103,9 +138,17 @@ class AIScorer:
 
     def evaluate_code(self, submission, docker_report, project_path=None):
         """
-        🚀 核心评分逻辑：实现双轨制数据生成
-        1. 详细维度分 (scores) -> 对应 Rubric 配置
-        2. 统计映射分 (stats_scores) -> 对应系统固定 Logic/Design/Style
+        Core scoring pipeline: Realizing the transformation from "factual evidence" to "semantic evaluation".
+
+        Process:
+        1. Evidence collection: Integrate the source code with the build/run output of the Docker sandbox.
+        Metrics alignment: Dynamically parse rating dimensions from job configuration (Layer 3).
+        3. Prompt word project: construct a deep PROMPT with three levels of evaluation criteria (system specification, course ability and assignment logic).
+        4. Result Normalization: The AI is required to output JSON containing detailed dimension scores, system statistics scores (Logic/Design/Style), and knowledge mastery.
+        :param submission: Submission model instance.
+        :param docker_report: Corresponding DockerReport instance.
+        :param project_path: Multi-file project path.
+        :return: Structured JSON data returned by the AI
         """
         is_java = submission.file.name.endswith(('.java', '.zip'))
         lang_name = "Java" if is_java else "Python"
@@ -195,7 +238,16 @@ class AIScorer:
             raise Exception(f"AI 评审引擎通信失败: {str(e)}")
 
     def get_rag_contexts(self, submission):
-        """静默 RAG 检索逻辑"""
+        """
+        Silent RAG retrieval logic.
+
+        Based on the course and programming language of the current assignment, relevant entries are dynamically retrieved from the knowledge point base:
+            - L1 (System Level): General programming best practices
+            - L2 (Course Level): the technical points of the current key assessment of the course.
+            -L3 (Task Level): The specific business logic requirements defined by the teacher in the assignment.
+        :param submission:
+        :return: Contains three layers of context description and a list of allowed knowledge point labels.
+        """
         assignment = submission.assignment
         is_java = submission.file.name.endswith(('.java', '.zip'))
         lang_filter = 'java' if is_java else 'python'
