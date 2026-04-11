@@ -56,13 +56,13 @@ REST_FRAMEWORK = {
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
     'DEFAULT_PERMISSION_CLASSES': (
-        'rest_framework.permissions.IsAuthenticated', # 默认所有接口都需要登录
+        'rest_framework.permissions.IsAuthenticated', # By default, all interfaces require a login
     ),
 }
 
 # Detailed configuration of JWT
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(days=1), # 方便开发，设置 1 天过期
+    'ACCESS_TOKEN_LIFETIME': timedelta(days=1), # set 1 day expiration
     'AUTH_HEADER_TYPES': ('Bearer',),
 }
 
@@ -149,11 +149,11 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 
-# Backend/settings.py 末尾
+# Default submission record local location
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
-# Celery 配置
+# Celery configuration
 CELERY_BROKER_URL = 'redis://127.0.0.1:6379/0'
 CELERY_RESULT_BACKEND = 'redis://127.0.0.1:6379/0'
 CELERY_ACCEPT_CONTENT = ['json']
@@ -161,11 +161,33 @@ CELERY_TASK_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 
 
-# 允许特定的域名访问
+# Allow access to specific domains
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:5173",  # Vite 默认端口
-    "http://localhost:3000",  # React/Vue 常用端口
+    "http://localhost:5173",  # Vite default port
+    "http://localhost:3000",  # Common Vue ports
     "http://127.0.0.1:5173",
 ]
 
 CORS_ALLOW_CREDENTIALS = True
+
+# Sprint 2
+
+# 邮件配置
+# EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+EMAIL_HOST = 'smtp.qq.com'  # 发件服务器地址
+EMAIL_PORT = 465
+EMAIL_USE_SSL = True
+EMAIL_HOST_USER = '3148556817@qq.com'  # 你的邮箱地址
+EMAIL_HOST_PASSWORD = 'your-auth-token'      # 邮箱授权码，非登录密码
+DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
+
+from celery.schedules import crontab
+
+CELERY_BEAT_SCHEDULE = {
+    'check-deadlines-every-hour': {
+        'task': 'apps.core.tasks.check_deadlines_and_send_reports',
+        'schedule': crontab(minute=0),  # 每小时整点执行一次
+    },
+}
+
