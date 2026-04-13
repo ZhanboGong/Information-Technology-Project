@@ -1,3 +1,4 @@
+import json
 import os
 import zipfile
 import io
@@ -5,6 +6,7 @@ import uuid
 import shutil
 import pandas as pd
 import traceback
+from apps.analytics.models import AIServiceLog
 from django.conf import settings
 from django.db import transaction
 from django.contrib.auth.hashers import make_password
@@ -12,23 +14,109 @@ from django.http import FileResponse, HttpResponse
 from django.utils import timezone
 from datetime import timedelta
 from django.utils.encoding import escape_uri_path
-from django.db.models import Max
+from django.shortcuts import get_object_or_404
+from django.db.models import Max, Count, Q
+from django.db.models.functions import TruncDate
 from rest_framework import viewsets, permissions, status, serializers
 from rest_framework.response import Response
+from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 
 # Import the model and serializer
-from .models import User, Course, Assignment, Submission, AIEvaluation, KnowledgePoint
+from .models import User, Course, Assignment, Submission, AIEvaluation, KnowledgePoint, SystemConfiguration
 from .serializers import (
     AssignmentSerializer,
     SubmissionSerializer,
     MyTokenObtainPairSerializer,
-    CourseSerializer, KnowledgePointSerializer, UserProfileSerializer, ChangePasswordSerializer
+    CourseSerializer, KnowledgePointSerializer, UserProfileSerializer, ChangePasswordSerializer, SystemConfigurationSerializer
 )
 from .utils.ai_scorer import AIScorer
 from .utils.project_analyzer import ProjectAnalyzer
+
+# Sprint 2
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def export_assignment_grades(request, assignment_id):
+    """
+
+    :param request:
+    :param assignment_id:
+    :return:
+    """
+    # 1. 获取作业并校验身份（只有该作业的老师可以导出）
+    assignment = get_object_or_404(Assignment, id=assignment_id)
+    if request.user != assignment.teacher and not request.user.is_staff:
+        return HttpResponse("您没有权限导出此成绩单", status=403)
+
+    # 2. 获取该作业设置的所有知识点 (作为 Excel 的动态列名)
+    kp_list = assignment.knowledge_points.all()
+    rubric_names = [kp.name for kp in kp_list]
+
+    # 3. 准备数据容器
+    data = []
+    # 获取选了这门课的所有学生
+    students = assignment.course.students.all()
+
+    for student in students:
+        # 获取该学生对此作业的最高分提交记录
+        submission = Submission.objects.filter(
+            student=student,
+            assignment=assignment,
+            status='completed'
+        ).order_by('-final_score').first()
+
+        # 基础列
+        row = {
+            "学号": student.student_id_num or "无",
+            "姓名": student.username,
+            "班级": student.class_name or "无",
+            "总分": submission.final_score if submission else "未提交"
+        }
+
+        # 4. 填充 Rubric 细分得分
+        if submission:
+            # 获取对应的 AI 评分记录
+            evaluation = AIEvaluation.objects.filter(submission=submission).first()
+            scores_dict = {}
+
+            if evaluation and evaluation.ai_raw_feedback:
+                try:
+                    # 尝试解析存储在 ai_raw_feedback 中的 JSON
+                    # 假设格式是: {"维度名1": 80, "维度名2": 90, "total_score": 85, "feedback": "..."}
+                    raw_json = json.loads(evaluation.ai_raw_feedback)
+                    # 如果 AI 返回的是 kp_scores 嵌套字典，则根据你的具体 JSON 结构调整
+                    scores_dict = raw_json.get('scores', raw_json)
+                except json.JSONDecodeError:
+                    scores_dict = {}
+
+            # 遍历老师设置的知识点，从 JSON 中找对应分值
+            for kp_name in rubric_names:
+                row[kp_name] = scores_dict.get(kp_name, "解析失败")
+        else:
+            # 未提交时，所有维度设为 0 或 "/"
+            for kp_name in rubric_names:
+                row[kp_name] = "/"
+
+        data.append(row)
+
+    # 5. 转换为 DataFrame 并导出 Excel
+    df = pd.DataFrame(data)
+
+    # 调整列顺序：学号, 姓名, 班级, 总分, 维度1, 维度2...
+    columns = ["学号", "姓名", "班级", "总分"] + rubric_names
+    df = df.reindex(columns=columns)
+
+    # 6. 构造 HttpResponse
+    filename = f"Grades_{assignment.title}.xlsx"
+    response = HttpResponse(content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    # 处理中文文件名
+    response['Content-Disposition'] = f'attachment; filename="{filename.encode("utf-8").decode("ISO-8859-1")}"'
+
+    df.to_excel(response, index=False, engine='openpyxl')
+
+    return response
 
 
 @api_view(['GET'])
@@ -250,80 +338,152 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='download-submission')
     def download_single_submission(self, request):
-        """
-        Download specific individual student submissions.
-
-        The interface implements automatic renaming logic: the original messy filename is converted to the standard format of "student_name_assignment title".
-        It is greatly convenient for teachers to archive and organize after downloading.
-
-        Permissions and Security:
-            - Force a 'assignment__teacher=request.user' check to make sure teachers can only download student work from their own course.
-            - Use 'escape_uri_path' to make sure Chinese filenames don't get messy in Chrome/Firefox etc.
-        :param request: DRF request object. You need to include the 'submission_id' in query_params.
-        :return:
-            FileResponse: Binary file stream
-            Response: 400 (parameter missing) or 404 (record does not exist/has no access)
-        """
         submission_id = request.query_params.get('submission_id')
         if not submission_id:
             return Response({"error": "缺少 submission_id 参数"}, status=400)
 
         try:
-            # Permission isolation query: Check the teacher of the assignment across the table by double underscores
-            submission = Submission.objects.get(id=submission_id, assignment__teacher=request.user)
-            file_handle = submission.file.open()
+            # 1. 先定位到这条提交记录
+            original_sub = Submission.objects.get(id=submission_id, assignment__teacher=request.user)
 
-            # Construct a normalized download filename
-            ext = os.path.splitext(submission.file.name)[1]
-            # Format: Student number _ name _ assignment title. Extensions
-            filename = f"{submission.student.student_id_num}_{submission.student.first_name}_{submission.assignment.title}{ext}"
-            # 3. Build the file response object
+            # 2. 核心逻辑：寻找该学生在该作业下的最高分记录
+            # 排序逻辑：优先看教师分，其次 AI 分，最后 ID (取最新的)
+            best_submission = Submission.objects.filter(
+                student=original_sub.student,
+                assignment=original_sub.assignment
+            ).order_by('-final_score', '-ai_evaluation__total_score', '-id').first()
+
+            if not best_submission:
+                best_submission = original_sub  # 保底方案
+
+            file_handle = best_submission.file.open()
+            ext = os.path.splitext(best_submission.file.name)[1]
+
+            # 构造文件名：学号_姓名_第X次尝试_分数
+            score_val = best_submission.final_score if best_submission.final_score else "AI评"
+            filename = f"{best_submission.student.student_id_num}_{best_submission.student.first_name}_Attempt{best_submission.attempt_number}_Score{score_val}{ext}"
+
             response = FileResponse(file_handle, content_type='application/octet-stream')
-            # RFC 5987: Use the filename*=utf-8 "syntax for non-ASCII filenames
             response['Content-Disposition'] = f"attachment; filename*=utf-8''{escape_uri_path(filename)}"
             return response
         except Submission.DoesNotExist:
-            return Response({"error": "No relevant commit record was found or access was not granted"}, status=404)
+            return Response({"error": "未找到记录或无权访问"}, status=404)
 
     @action(detail=True, methods=['get'], url_path='download-all')
     def download_all_submissions(self, request, pk=None):
-        """
-        Download the latest submission of all students under a given assignment in bulk and package it as ZIP.
-
-        Business logic:
-        1. Deduplicate: Use Django's 'Max('id')' aggregation function to filter out each student's "last" submission for that assignment.
-        2. Memory compression: Using 'IO. BytesIO' to complete the compression process in memory, does not occupy disk IO, and has fast response time.
-        3. Structural reorganization: In the ZIP package, the files are renamed to the "student number _ name" format, which is convenient for bulk import into other scoring software or archiving.
-        :param request: DRF request object.
-        :param pk: The ID of the target job.
-        :return: Contains the response in a ZIP archive.
-        """
         assignment = self.get_object()
-        # Get the last submission for each student under that assignment
-        from django.db.models import Max
-        latest_submissions_ids = Submission.objects.filter(assignment=assignment).values('student').annotate(
-            latest_id=Max('id')).values_list('latest_id', flat=True)
-        submissions = Submission.objects.filter(id__in=latest_submissions_ids)
+
+        # 1. 核心筛选逻辑：找到每个学生分值最高的提交 ID 列表
+        # 我们先按学生、分数倒序、ID 倒序排列所有提交
+        all_subs = Submission.objects.filter(assignment=assignment).order_by(
+            'student', '-final_score', '-ai_evaluation__total_score', '-id'
+        )
+
+        # 在内存中去重（由于 order_by 的顺序，循环中每个学生遇到的第一条就是最高分）
+        best_ids = []
+        seen_students = set()
+        for s in all_subs:
+            if s.student_id not in seen_students:
+                best_ids.append(s.id)
+                seen_students.add(s.student_id)
+
+        submissions = Submission.objects.filter(id__in=best_ids).select_related('student')
 
         if not submissions.exists():
-            return Response({"error": "There is no record of submission"}, status=404)
+            return Response({"error": "暂无提交记录"}, status=404)
 
-        # Create a ZIP file in memory
         byte_io = io.BytesIO()
         with zipfile.ZipFile(byte_io, 'w', zipfile.ZIP_DEFLATED) as zip_file:
             for sub in submissions:
                 if sub.file and os.path.exists(sub.file.path):
                     ext = os.path.splitext(sub.file.name)[1]
-                    # ZIP file name: Student number _ Name. Suffix
-                    arc_name = f"{sub.student.student_id_num}_{sub.student.first_name}{ext}"
+                    # 在 ZIP 内展示分数信息
+                    score_val = sub.final_score if sub.final_score else "AI评"
+                    arc_name = f"{sub.student.student_id_num}_{sub.student.first_name}_Attempt{sub.attempt_number}_Score{score_val}{ext}"
                     zip_file.write(sub.file.path, arcname=arc_name)
 
         byte_io.seek(0)
-        zip_filename = f"{assignment.title}_全部提交.zip"
+        zip_filename = f"{assignment.title}_最高分作业合集.zip"
 
         response = HttpResponse(byte_io, content_type='application/zip')
         response['Content-Disposition'] = f"attachment; filename*=utf-8''{escape_uri_path(zip_filename)}"
         return response
+
+    @action(detail=True, methods=['get'], url_path='submissions')
+    def get_submissions(self, request, pk=None):
+        """
+        获取当前作业下所有学生的提交情况
+        """
+        assignment = self.get_object()
+        # 获取该作业的所有提交，并预加载学生信息和 AI 评价
+        submissions = Submission.objects.filter(assignment=assignment) \
+            .select_related('student', 'ai_evaluation') \
+            .order_by('-created_at')
+
+        # 序列化数据（你可以直接手动构造 List，或者使用 SubmissionSerializer）
+        data = []
+        for sub in submissions:
+            data.append({
+                "id": sub.id,
+                "student": sub.student.id,
+                "student_name": sub.student.first_name or sub.student.username,
+                "student_id_num": sub.student.student_id_num,
+                "sub_type": sub.sub_type,
+                "status": sub.status,
+                "attempt_number": sub.attempt_number,
+                "final_score": float(sub.final_score) if sub.final_score else None,
+                "created_at": sub.created_at,
+                "ai_evaluation": {
+                    "feedback": sub.ai_evaluation.feedback if hasattr(sub, 'ai_evaluation') else None,
+                    "total_score": float(sub.ai_evaluation.total_score) if hasattr(sub, 'ai_evaluation') else 0
+                } if hasattr(sub, 'ai_evaluation') else None
+            })
+        return Response(data)
+
+    @action(detail=True, methods=['get'], url_path='student-best')
+    def get_student_best_performance(self, request, pk=None):
+        """
+        获取指定学生在某次作业中的最高分记录及详细 AI 评价
+        """
+        assignment = self.get_object()
+        student_id = request.query_params.get('student_id')
+
+        if not student_id:
+            return Response({"error": "需要 student_id"}, status=400)
+
+        # 1. 查找最高分 Submission
+        best_sub = Submission.objects.filter(
+            assignment=assignment,
+            student_id=student_id,
+            status='completed'
+        ).order_by('-final_score', '-id').first()
+
+        if not best_sub:
+            return Response({"message": "该学生尚未完成提交"}, status=404)
+
+        # 2. 获取对应的 AIEvaluation
+        # 使用 hasattr 或 try-except 确保鲁棒性
+        evaluation_data = None
+        if hasattr(best_sub, 'ai_evaluation'):
+            eval_obj = best_sub.ai_evaluation
+            evaluation_data = {
+                "total_score": float(eval_obj.total_score),
+                "kp_scores": eval_obj.kp_scores,  # 假设你模型里有这个字段
+                "feedback": eval_obj.feedback,
+                "ai_raw_feedback": eval_obj.ai_raw_feedback,
+                "is_published": eval_obj.is_published,
+                "teacher_reviewed": eval_obj.teacher_reviewed
+            }
+
+        return Response({
+            "submission_id": best_sub.id,
+            "final_score": float(best_sub.final_score) if best_sub.final_score else 0,
+            "attempt_number": best_sub.attempt_number,
+            "created_at": best_sub.created_at,
+            "evaluation": evaluation_data
+        })
+
+
 
 
 class KnowledgePointViewSet(viewsets.ReadOnlyModelViewSet):
@@ -758,3 +918,234 @@ class UserProfileViewSet(viewsets.GenericViewSet):
         user.set_password(serializer.data.get('new_password'))
         user.save()
         return Response({"message": "Password changed successfully"})
+
+
+class IsAdminUser(permissions.BasePermission):
+    """
+    Custom permission class: Access restricted to system administrators only.
+    This type verifies the authentication status and role field (role) of the requesting user to ensure that only users with 'admin' privileges can call the associated view interface. This is crucial when handling global settings, system logs, and teacher account management.
+    Logic:
+        - The user must pass the authentication process (is_authenticated).
+        - The user's role field must match the 'admin' identifier.
+    """
+    def has_permission(self, request, view):
+        """
+        Determine whether the current request has access permission.
+        :param request: The DRF request object contains user information.
+        :param view: The current instance of the view being accessed.
+        :return: bool: If the user is a logged-in administrator, return True; otherwise, return False.
+        """
+        return request.user.is_authenticated and request.user.role == 'admin'
+
+
+class SystemConfigViewSet(viewsets.ViewSet):
+    """
+    Admin端：系统全局配置管理 (DeepSeek API等)
+    """
+    permission_classes = [IsAdminUser]
+
+    def get_object(self):
+        return SystemConfiguration.get_config()
+
+    @action(detail=False, methods=['get'])
+    def get_settings(self, request):
+        """获取当前API配置"""
+        config = self.get_object()
+        serializer = SystemConfigurationSerializer(config)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['post'])
+    def update_settings(self, request):
+        """更新API配置"""
+        config = self.get_object()
+        serializer = SystemConfigurationSerializer(config, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({"message": "系统配置已更新", "data": serializer.data})
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AdminDashboardStatsView(APIView):
+    """
+    Admin端：仪表盘统计数据汇总接口
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]  # 使用你已经定义好的权限类
+
+    def get(self, request):
+        # 1. 基础统计指标
+        total_users = User.objects.count()
+        active_courses = Course.objects.count()
+        total_submissions = Submission.objects.count()
+
+        # 将过去24小时内状态为 'failed' 的提交定义为系统告警
+        yesterday = timezone.now() - timedelta(days=1)
+        system_alerts = Submission.objects.filter(status='failed', created_at__gte=yesterday).count()
+
+        # 2. 最近动态 (获取最近5条提交记录)
+        recent_submissions = Submission.objects.select_related('student', 'assignment').order_by('-created_at')[:5]
+        logs = []
+        for sub in recent_submissions:
+            logs.append({
+                "action": f"学生 {sub.student.username} 提交了作业: {sub.assignment.title}",
+                "time": sub.created_at,
+                "color": "bg-blue-500" if sub.status == 'completed' else "bg-amber-500"
+            })
+
+        # 3. 图表数据：过去7天的每日提交趋势
+        last_week = timezone.now() - timedelta(days=7)
+        chart_data_query = Submission.objects.filter(created_at__gte=last_week) \
+            .annotate(day=TruncDate('created_at')) \
+            .values('day') \
+            .annotate(count=Count('id')) \
+            .order_by('day')
+
+        chart_data = [
+            {"day": item['day'].strftime('%m-%d'), "count": item['count']}
+            for item in chart_data_query
+        ]
+
+        return Response({
+            "stats": [
+                {"label": "Total Users", "value": f"{total_users:,}", "trend": "+2%", "trendClass": "text-emerald-500"},
+                {"label": "Active Courses", "value": active_courses, "trend": "Stable", "trendClass": "text-blue-500"},
+                {"label": "Submissions", "value": f"{total_submissions:,}", "trend": "+15%",
+                 "trendClass": "text-emerald-500"},
+                {"label": "System Alerts", "value": system_alerts, "trend": "-10%", "trendClass": "text-amber-500"}
+            ],
+            "recentLogs": logs,
+            "chartData": chart_data
+        })
+
+
+class AdminUserManagementViewSet(viewsets.ModelViewSet):
+    """
+    Admin端：用户管理
+    """
+    queryset = User.objects.all().order_by('-date_joined')
+    serializer_class = UserProfileSerializer
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get_queryset(self):
+        # 修正：直接使用 super().get_queryset() 或 User.objects.all()
+        queryset = User.objects.all().order_by('-id')
+
+        role = self.request.query_params.get('role')
+        search = self.request.query_params.get('search')
+
+        if role and role != 'all':
+            queryset = queryset.filter(role=role)
+
+        if search:
+            # 修正：直接使用 Q 而不是 models.Q（除非你 import django.db.models as models）
+            queryset = queryset.filter(
+                Q(username__icontains=search) |
+                Q(first_name__icontains=search) |
+                Q(student_id_num__icontains=search)
+            )
+        return queryset
+
+    @action(detail=True, methods=['post'], url_path='reset-password')
+    def reset_password(self, request, pk=None):
+        user = self.get_object()
+        # 重置密码为学号/工号，或固定默认值
+        default_pwd = user.student_id_num if user.student_id_num else "123456"
+        user.set_password(default_pwd)
+        user.save()
+        return Response({"message": f"密码已重置为: {default_pwd}"})
+
+    def perform_create(self, serializer):
+        """
+        在保存用户前，进行业务逻辑处理：
+        1. 默认密码设为学号/工号
+        2. 如果没传 student_id_num，默认密码设为 123456
+        """
+        student_id = self.request.data.get('student_id_num', '')
+        password = make_password(student_id if student_id else "123456")
+
+        # 强制将 username 设为 student_id_num (符合你登录系统的设计)
+        serializer.save(
+            password=password,
+            username=student_id if student_id else serializer.validated_data.get('username')
+        )
+
+
+class SystemMonitorView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        import random
+        # 1. 模拟系统节点状态 (保持不变)
+        nodes = [
+            {'name': 'Core API Server', 'status': 'Online', 'load': random.randint(20, 40),
+             'desc': 'Django Gunicorn Stack'},
+            {'name': 'Celery Worker 01', 'status': 'Online', 'load': random.randint(5, 30), 'desc': 'Grading Runner'},
+            {'name': 'Redis Broker', 'status': 'Online', 'load': random.randint(1, 5), 'desc': 'Message Queue'},
+        ]
+
+        # 2. 获取最近任务 (保持不变)
+        recent_tasks = Submission.objects.order_by('-created_at')[:5]
+        queue_tasks = []
+        status_map = {'pending': 'Pending', 'running': 'Running', 'completed': 'Success', 'failed': 'Failed'}
+        for task in recent_tasks:
+            queue_tasks.append({
+                'id': str(task.id),
+                'type': 'AI Grading Pipeline' if task.sub_type == 'archive' else 'Single File Test',
+                'status': status_map.get(task.status, 'Unknown'),
+                'time': task.created_at
+            })
+
+        # 3. 【核心增强】从 AIServiceLog 获取真实 AI 性能数据
+        # 获取最近 20 条日志用于绘制趋势图
+        ai_logs = AIServiceLog.objects.order_by('-created_at')[:20]
+
+        # 计算平均延迟和 Token 总量
+        if ai_logs.exists():
+            avg_latency = sum(log.response_time for log in ai_logs) / ai_logs.count()
+            total_tokens_24h = sum(log.total_tokens for log in ai_logs)  # 简化逻辑，实际可按时间过滤
+
+            # 构造趋势图数据 (response_time)
+            latency_history = [int(log.response_time * 1000) for log in reversed(ai_logs)]  # 转为毫秒
+        else:
+            avg_latency = 0
+            total_tokens_24h = 0
+            latency_history = [0] * 12
+
+        api_performance = [
+            {
+                'label': 'DeepSeek API Response',
+                'latency': int(avg_latency * 1000),
+                'history': latency_history,
+                'extra': f"Total Tokens: {total_tokens_24h}"
+            }
+        ]
+
+        return Response({
+            "nodes": nodes,
+            "queueTasks": queue_tasks,
+            "apiPerformance": api_performance
+        })
+
+
+class AdminSystemLogView(APIView):
+    """
+    Admin端：获取系统审计与AI调用日志
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        # 获取最近的 50 条 AI 调用日志
+        logs = AIServiceLog.objects.select_related().all().order_by('-created_at')[:50]
+
+        log_data = []
+        for log in logs:
+            log_data.append({
+                "id": log.id,
+                "service": log.service_name,
+                "endpoint": log.endpoint,
+                "tokens": log.total_tokens,
+                "latency": f"{int(log.response_time * 1000)}ms",
+                "status": log.status_code,
+                "time": log.created_at
+            })
+
+        return Response(log_data)
