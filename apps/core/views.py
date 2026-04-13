@@ -940,28 +940,44 @@ class IsAdminUser(permissions.BasePermission):
 
 class SystemConfigViewSet(viewsets.ViewSet):
     """
-    Admin端：系统全局配置管理 (DeepSeek API等)
+    Administrator end: System global configuration management view set.
+    This view set enables system administrators to dynamically adjust the backend core parameters (such as the DeepSeek API key, Base URL, model version, etc.). Through the singleton pattern (SystemConfiguration), it ensures the uniformity and real-time nature of the entire site's configuration.
+    Permission restrictions:
+        - Access is restricted to users with the 'admin' role (IsAdminUser).
     """
     permission_classes = [IsAdminUser]
 
     def get_object(self):
+        """
+        Obtain the singleton instance of the system configuration.
+        The logic for obtaining the singleton has been encapsulated, ensuring that whether it is for obtaining or updating, the operation is performed on the sole configuration record in the database.
+        :return:
+        """
         return SystemConfiguration.get_config()
 
     @action(detail=False, methods=['get'])
     def get_settings(self, request):
-        """获取当前API配置"""
+        """
+        Obtain the current system API and runtime environment configuration.
+        The administrator can use this interface to view the current status of DeepSeek and other parameters such as token restrictions on the front-end panel.
+        """
         config = self.get_object()
         serializer = SystemConfigurationSerializer(config)
         return Response(serializer.data)
 
     @action(detail=False, methods=['post'])
     def update_settings(self, request):
-        """更新API配置"""
+        """
+        Dynamically update the global system configuration.
+        Support for partial update (Partial Update). After the update is completed, all subsequent AI scoring requests (AIScorer) will immediately adopt the latest configuration parameters, without the need to restart the backend service.
+        :param request: The request body that includes updated fields (such as api_key, model_name).
+        :return: The newly updated configuration data after the update was successful or the error message indicating a verification failure.
+        """
         config = self.get_object()
         serializer = SystemConfigurationSerializer(config, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
-            return Response({"message": "系统配置已更新", "data": serializer.data})
+            return Response({"message": "System configuration has been updated.", "data": serializer.data})
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
