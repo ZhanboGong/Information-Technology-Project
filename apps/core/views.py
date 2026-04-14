@@ -401,14 +401,28 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'], url_path='suggest-kps')
     def suggest_knowledge_points(self, request):
         """
-        AI 智能建议并自动生成 L2 知识点
+        AI intelligence suggests and automatically generates L2 level knowledge points.
+
+        Business Background:
+        When teachers publish assignments, they often need to manually define specific test points (L2 knowledge points).
+        The interface uses AI to deeply analyze job requirements (Content) and scoring dimensions (Rubric) and generate them automatically
+        Professional programming skill points to match and tie them to the current curriculum.
+
+        Logical flow:
+        1. Context Construction: Format the Rubric configuration items into AI-readable textual descriptions.
+        2. Prompt-driven: Requires the AI to identify 3-5 core skills and output a rigid JSON structure.
+        3. Result cleaning: Handle Markdown tags in AI responses and parse them into Python objects.
+        4. Automatic persistence: Use 'get_or_create' to ensure that points with the same name in the same course and language are not repeated.
+        5. Front-end synchronization: Returns data containing the database ID so that the front-end can be directly used for job association.
+        :param request: Requests containing title, content, language, course_id, rubric_config.
+        :return: A list of suggested knowledge points (with ids and existing/newly created identifiers).
         """
         title = request.data.get('title', '')
         content = request.data.get('content', '')
         language = request.data.get('language', 'python')
-        # 获取所属课程 ID (L2 必须绑定课程)
+        # Get the course ID (L2 must be bound to the course)
         course_id = request.data.get('course', request.data.get('course_id'))
-        # 获取第二步填写的评分标准
+        # Get the rating scale filled out in step 2
         rubric_config = request.data.get('rubric_config', {})
 
         if not content:
@@ -417,7 +431,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         if not course_id:
             return Response({"error": "Course ID is required to generate L2 Knowledge Points."}, status=400)
 
-        # 1. 将 Rubric 转换成可读文本描述供 AI 参考
+        # 1. Convert the Rubric into a readable text description for AI reference
         rubric_desc = ""
         if rubric_config and 'items' in rubric_config:
             rubric_desc = "\n".join([
@@ -427,7 +441,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
         scorer = AIScorer()
 
-        # 2. 构造 Prompt
+        # 2. Construct Prompt
         prompt = f"""
             You are a professional programming teaching assistant. Please identify 3-5 core programming skills (L2 level) that students must master to complete this task.
 
@@ -452,17 +466,17 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
             """
 
         try:
-            # 3. 请求 AI 并清洗结果
+            # 3. Ask the AI and clean the results
             raw_res = scorer.ask(prompt)
             clean_json = raw_res.replace('```json', '').replace('```', '').strip()
             suggestions = json.loads(clean_json)
 
-            # 4. 自动持久化：将建议的知识点写入数据库
+            # 4. Automatic persistence: The suggested knowledge points are written to the database
             course_obj = Course.objects.get(id=course_id)
             final_suggestions = []
 
             for kp_data in suggestions.get('suggested_kps', []):
-                # 这里的逻辑是：如果同名、同语言、同课程的 KP 已存在则获取，不存在则创建
+                # If the KP with the same name, language, and course already exists, it will be obtained, and if not, it will be created
                 kp, created = KnowledgePoint.objects.get_or_create(
                     name=kp_data['name'],
                     course=course_obj,
@@ -473,7 +487,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
                         'is_system': False
                     }
                 )
-                # 组合返回给前端的数据，包含数据库 ID
+                # Combine the data returned to the frontend, including the database ID
                 final_suggestions.append({
                     "id": kp.id,
                     "name": kp.name,
@@ -481,7 +495,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
                     "is_new": created
                 })
 
-            # 5. 返回结果
+            # 5. Return results
             return Response({
                 "suggested_kps": final_suggestions
             })
