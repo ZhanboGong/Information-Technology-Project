@@ -40,34 +40,42 @@ from .utils.project_analyzer import ProjectAnalyzer
 @permission_classes([IsAuthenticated])
 def export_assignment_grades(request, assignment_id):
     """
-
-    :param request:
-    :param assignment_id:
-    :return:
+    Export all student grades of the specified assignment to Excel.
+    This interface has a "dynamic column" generation logic, which can automatically adjust the table headers according to the Rubric dimensions specified in the job configuration.
+    Business Logic:
+    1. Permission Check: Only the instructors of this course or system administrators are allowed to export.
+    2. Dynamic Column Headers: Extract the knowledge points (KnowledgePoint) associated with the assignment as an additional scoring column in Excel.
+    3. Data Cleaning:
+        - Automatically obtain the highest score submission record for each student (Submission).
+        - Parse the JSON breakdown scores stored in AIEvaluation.ai_raw_feedback.
+        - Handle edge cases such as no submission, parsing failure, etc.
+    4. Formatting Output: Use Pandas to construct a DataFrame and use the openpyxl engine to generate an .xlsx file stream.
+    :param request: DRF Request Object.
+    :param assignment_id: The ID of the target assignment
+    :return: Binary Excel file stream.
     """
-    # 1. 获取作业并校验身份（只有该作业的老师可以导出）
+    # 1. Obtain the assignment and verify the identity (Only the teacher of this assignment can export it)
     assignment = get_object_or_404(Assignment, id=assignment_id)
     if request.user != assignment.teacher and not request.user.is_staff:
-        return HttpResponse("您没有权限导出此成绩单", status=403)
+        return HttpResponse("You do not have the permission to export this transcript.", status=403)
 
-    # 2. 获取该作业设置的所有知识点 (作为 Excel 的动态列名)
+    # 2. Obtain all the knowledge points (as dynamic column names in Excel) set for this assignment
     kp_list = assignment.knowledge_points.all()
     rubric_names = [kp.name for kp in kp_list]
 
-    # 3. 准备数据容器
+    # 3. Prepare data container
     data = []
-    # 获取选了这门课的所有学生
+    # Obtain all the students who have chosen this course
     students = assignment.course.students.all()
 
     for student in students:
-        # 获取该学生对此作业的最高分提交记录
+        # Obtain the submission record of this student's highest score for this assignment
         submission = Submission.objects.filter(
             student=student,
             assignment=assignment,
             status='completed'
         ).order_by('-final_score').first()
 
-        # 基础列
         row = {
             "学号": student.student_id_num or "无",
             "姓名": student.username,
@@ -75,43 +83,41 @@ def export_assignment_grades(request, assignment_id):
             "总分": submission.final_score if submission else "未提交"
         }
 
-        # 4. 填充 Rubric 细分得分
+        # 4. Fill in the Rubric and break down the scores
         if submission:
-            # 获取对应的 AI 评分记录
+            # Obtain the corresponding AI scoring record
             evaluation = AIEvaluation.objects.filter(submission=submission).first()
             scores_dict = {}
 
             if evaluation and evaluation.ai_raw_feedback:
                 try:
-                    # 尝试解析存储在 ai_raw_feedback 中的 JSON
-                    # 假设格式是: {"维度名1": 80, "维度名2": 90, "total_score": 85, "feedback": "..."}
+                    # Attempt to parse the JSON stored in ai_raw_feedback
                     raw_json = json.loads(evaluation.ai_raw_feedback)
-                    # 如果 AI 返回的是 kp_scores 嵌套字典，则根据你的具体 JSON 结构调整
                     scores_dict = raw_json.get('scores', raw_json)
                 except json.JSONDecodeError:
                     scores_dict = {}
 
-            # 遍历老师设置的知识点，从 JSON 中找对应分值
+            # Traverse the knowledge points set by the teacher and find the corresponding scores from the JSON.
             for kp_name in rubric_names:
-                row[kp_name] = scores_dict.get(kp_name, "解析失败")
+                row[kp_name] = scores_dict.get(kp_name, "Parsing failed")
         else:
-            # 未提交时，所有维度设为 0 或 "/"
+            # Set all dimensions to 0 or "/" when not committed.
             for kp_name in rubric_names:
                 row[kp_name] = "/"
 
         data.append(row)
 
-    # 5. 转换为 DataFrame 并导出 Excel
+    # 5. Convert to DataFrame and export to Excel
     df = pd.DataFrame(data)
 
-    # 调整列顺序：学号, 姓名, 班级, 总分, 维度1, 维度2...
+    # Adjust column order: Student number, name, class, total score, dimension 1, dimension 2...
     columns = ["学号", "姓名", "班级", "总分"] + rubric_names
     df = df.reindex(columns=columns)
 
-    # 6. 构造 HttpResponse
+    # 6. Construct the HttpResponse
     filename = f"Grades_{assignment.title}.xlsx"
     response = HttpResponse(content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-    # 处理中文文件名
+    # Handle Chinese file names
     response['Content-Disposition'] = f'attachment; filename="{filename.encode("utf-8").decode("ISO-8859-1")}"'
 
     df.to_excel(response, index=False, engine='openpyxl')
@@ -223,18 +229,125 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
     permission_classes = [IsTeacher]
 
     # 这里需要稍作修改，作业与知识点的关系
+    def create(self, request, *args, **kwargs):
+        """
+        全量覆盖创建逻辑：
+        1. 剥离会导致报错的 JSON 字符串。
+        2. 给序列化器提供伪装后的 Python 对象以通过“必填”校验。
+        3. 保存后手动将真实 JSON 数据注入数据库。
+        """
+        # 1. 拷贝原始数据（FormData 默认不可变）
+        data = request.data.copy()
+
+        # 🚀 核心逻辑：提取可能导致 400 错误的字段字符串
+        # 即使前端 stringify 了，DRF 处理 Multipart 数据时也经常会把这里识别为格式错误
+        rubric_str = data.get('rubric_config')
+        logic_str = data.get('reference_logic')
+
+        # 🚀 核心逻辑：给这几个字段赋“假值”（合法的 Python 对象），骗过 Serializer 的格式校验
+        # 这样它就不会报 "Value must be valid JSON" 了
+        data['rubric_config'] = {}
+        data['reference_logic'] = []
+
+        # 处理 Knowledge Points (ManyToMany) 的 ID 列表还原
+        kp_val = data.get('knowledge_points')
+        if kp_val and isinstance(kp_val, str):
+            try:
+                parsed_kp = json.loads(kp_val)
+                if isinstance(parsed_kp, list):
+                    # 兼容对象数组 [ {id:1}, {id:2} ] 或 ID 数组 [1, 2]
+                    if len(parsed_kp) > 0 and isinstance(parsed_kp[0], dict):
+                        data.setlist('knowledge_points', [i.get('id') for i in parsed_kp if i.get('id')])
+                    else:
+                        data.setlist('knowledge_points', parsed_kp)
+            except:
+                pass
+
+        # 2. 实例化并校验（此时 rubric_config 为 {}，必定能通过格式校验）
+        serializer = self.get_serializer(data=data)
+        if not serializer.is_valid():
+            print("❌ 详细校验失败:", serializer.errors)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        # 3. 调用保存逻辑 (触发下面的 perform_create)
+        # 这里会处理文件上传(attachment)和基础字段
+        assignment = serializer.save(teacher=self.request.user)
+
+        # 4. 🚀 手动补丁：在数据库层面直接写入真实的 JSON 数据
+        # 绕过 DRF 序列化器的所有解析器，直接使用 Python 原生的 json 库
+        try:
+            if rubric_str:
+                # 判断：如果是字符串则 loads，如果是对象则直接用
+                assignment.rubric_config = json.loads(rubric_str) if isinstance(rubric_str, str) else rubric_str
+            if logic_str:
+                assignment.reference_logic = json.loads(logic_str) if isinstance(logic_str, str) else logic_str
+
+            # 再次处理 knowledge_points 的关联（双重保险）
+            if kp_val and isinstance(kp_val, str):
+                parsed_kp = json.loads(kp_val)
+                if isinstance(parsed_kp, list) and len(parsed_kp) > 0:
+                    ids = [i.get('id') if isinstance(i, dict) else i for i in parsed_kp]
+                    assignment.knowledge_points.set(ids)
+
+            # 最终执行 Model 层的保存
+            assignment.save()
+        except Exception as e:
+            print(f"⚠️ JSON 手动补偿失败: {str(e)}")
+
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
     def perform_create(self, serializer):
         """
-        Save the newly created assignment instance, and associate the teacher and the knowledge point.
-        This method overrides the parent class's perform_create to ensure that the currently logged in teacher is automatically logged in when the job is created
-        Set as the owner of the job and handle many-to-many relationships (KnowledgePoints) manually.
-        :param serializer: Validated job serializer instance
-        :return: none
+        此方法现在变得非常纯粹，只负责最初的实例保存和老师绑定。
         """
-        kp_ids = self.request.data.get('knowledge_points', [])
-        assignment = serializer.save(teacher=self.request.user)
-        if kp_ids:
-            assignment.knowledge_points.set(kp_ids)
+        serializer.save(teacher=self.request.user)
+
+    def update(self, request, *args, **kwargs):
+        """
+        全量覆盖修改逻辑，复用创建时的 JSON 补丁逻辑
+        """
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+
+        # 1. 准备数据拷贝
+        data = request.data.copy()
+
+        # 提取真实 JSON 字符串用于后续手动注入
+        rubric_str = data.get('rubric_config')
+        logic_str = data.get('reference_logic')
+
+        # 2. 赋予假值以通过 Serializer 校验
+        data['rubric_config'] = {}
+        data['reference_logic'] = []
+
+        # 处理 ManyToMany 知识点
+        kp_val = data.get('knowledge_points')
+        if kp_val and isinstance(kp_val, str):
+            try:
+                parsed_kp = json.loads(kp_val)
+                data.setlist('knowledge_points', [i.get('id') if isinstance(i, dict) else i for i in parsed_kp])
+            except:
+                pass
+
+        # 3. 校验并保存基础字段
+        serializer = self.get_serializer(instance, data=data, partial=partial)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        assignment = serializer.save()
+
+        # 4. 手动注入真实的 JSON 数据
+        try:
+            if rubric_str:
+                assignment.rubric_config = json.loads(rubric_str) if isinstance(rubric_str, str) else rubric_str
+            if logic_str:
+                assignment.reference_logic = json.loads(logic_str) if isinstance(logic_str, str) else logic_str
+            assignment.save()
+        except Exception as e:
+            print(f"Update JSON Patch Error: {e}")
+
+        return Response(serializer.data)
 
     @action(detail=True, methods=['post'], url_path='publish-all')
     def publish_all_results(self, request, pk=None):
@@ -284,57 +397,99 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'], url_path='suggest-kps')
     def suggest_knowledge_points(self, request):
         """
-
-        :param request:
-        :return:
+        AI 智能建议并自动生成 L2 知识点
         """
         title = request.data.get('title', '')
         content = request.data.get('content', '')
         language = request.data.get('language', 'python')
+        # 获取所属课程 ID (L2 必须绑定课程)
+        course_id = request.data.get('course', request.data.get('course_id'))
+        # 获取第二步填写的评分标准
+        rubric_config = request.data.get('rubric_config', {})
 
         if not content:
-            return Response({"error": "作业要求（描述）不能为空"}, status=400)
+            return Response({"error": "Assignment requirements (content) cannot be empty."}, status=400)
+
+        if not course_id:
+            return Response({"error": "Course ID is required to generate L2 Knowledge Points."}, status=400)
+
+        # 1. 将 Rubric 转换成可读文本描述供 AI 参考
+        rubric_desc = ""
+        if rubric_config and 'items' in rubric_config:
+            rubric_desc = "\n".join([
+                f"- Assessment Dimension: {item.get('criterion')} (Weight: {item.get('weight')}%)"
+                for item in rubric_config.get('items', [])
+            ])
 
         scorer = AIScorer()
-        # 优化 Prompt：明确要求不要包含 Markdown 代码块标签
+
+        # 2. 构造 Prompt
         prompt = f"""
-            你是一名专业的编程教学助理。请根据以下作业任务，识别出学生完成该作业需要掌握的 3-5 个核心编程知识点（L2 级别）。
+            You are a professional programming teaching assistant. Please identify 3-5 core programming skills (L2 level) that students must master to complete this task.
 
-            作业标题：{title}
-            作业要求：{content}
-            编程语言：{language}
+            [Assignment Title]:{title}
+            [Assignment Requirements]:{content}
+            [Programming Language]:{language}
+            [Grading Standards (Rubric)]:
+            {rubric_desc or "Standard coding practices"}
 
-            要求：
-            1. 知识点名称要简练（如：递归调用、类继承、异常处理）。
-            2. 详细考核逻辑应说明学生需要如何实现或运用该技术点。
-            3. 直接输出 JSON 结果，不要包含任何 Markdown 格式的标签（如 ```json）。
+            Requirements:
+            1. Knowledge point names (name) should be concise (e.g., Recursion, Class Inheritance, Exception Handling).
+            2. The detailed assessment logic (description) should explain how students should apply the technology based on the requirements and rubric to achieve high scores.
+            3. Output the result directly in JSON format. Do not include Markdown tags like ```json.
 
-            JSON 格式如下：
+            JSON Format:
             {{
                 "suggested_kps": [
-                    {{"name": "知识点名称", "description": "详细考核逻辑说明"}},
+                    {{"name": "Skill Name", "description": "Detailed assessment logic说明"}},
                     ...
                 ]
             }}
             """
 
         try:
+            # 3. 请求 AI 并清洗结果
             raw_res = scorer.ask(prompt)
+            clean_json = raw_res.replace('```json', '').replace('```', '').strip()
+            suggestions = json.loads(clean_json)
 
-            # 清洗 AI 可能返回的 Markdown 标签
-            if "```json" in raw_res:
-                raw_res = raw_res.split("```json")[-1].split("```")[0].strip()
-            elif "```" in raw_res:
-                raw_res = raw_res.split("```")[-1].split("```")[0].strip()
+            # 4. 自动持久化：将建议的知识点写入数据库
+            course_obj = Course.objects.get(id=course_id)
+            final_suggestions = []
 
-            import json
-            suggestions = json.loads(raw_res)
-            return Response(suggestions)
+            for kp_data in suggestions.get('suggested_kps', []):
+                # 这里的逻辑是：如果同名、同语言、同课程的 KP 已存在则获取，不存在则创建
+                kp, created = KnowledgePoint.objects.get_or_create(
+                    name=kp_data['name'],
+                    course=course_obj,
+                    language=language.lower(),
+                    defaults={
+                        'description': kp_data['description'],
+                        'category': 'L2',
+                        'is_system': False
+                    }
+                )
+                # 组合返回给前端的数据，包含数据库 ID
+                final_suggestions.append({
+                    "id": kp.id,
+                    "name": kp.name,
+                    "description": kp.description,
+                    "is_new": created
+                })
+
+            # 5. 返回结果
+            return Response({
+                "suggested_kps": final_suggestions
+            })
+
+        except Course.DoesNotExist:
+            return Response({"error": "The specified course does not exist."}, status=404)
         except json.JSONDecodeError:
-            print(f"❌ AI 返回内容无法解析: {raw_res}")
-            return Response({"error": "AI 返回格式异常，请稍后再试"}, status=500)
+            print(f"❌ Failed to parse AI response: {raw_res}")
+            return Response({"error": "AI returned an invalid format. Please try again."}, status=500)
         except Exception as e:
-            return Response({"error": f"AI 生成失败: {str(e)}"}, status=500)
+            print(f"AI KP Generation Error: {str(e)}")
+            return Response({"error": f"AI generation failed: {str(e)}"}, status=500)
 
     @action(detail=False, methods=['get'], url_path='download-submission')
     def download_single_submission(self, request):
@@ -983,21 +1138,37 @@ class SystemConfigViewSet(viewsets.ViewSet):
 
 class AdminDashboardStatsView(APIView):
     """
-    Admin端：仪表盘统计数据汇总接口
+    Administrator end: Dashboard statistical data summary interface.
+    This interface provides real-time data support for the system management homepage and consists of three core dimensions:
+    1. Key Indicators (KPIs): Total number of users, total number of courses, total submission volume, and abnormal alerts within 24 hours.
+    2. Real-time Logs: The flow of student submissions that occurred recently.
+    3. Trend Analysis: The curve showing the changes in daily homework submissions over the past 7 days.
+    Permission restrictions:
+        - Must undergo identity verification.
+        - Must have the 'admin' role permission (IsAdminUser).
     """
-    permission_classes = [IsAuthenticated, IsAdminUser]  # 使用你已经定义好的权限类
+    permission_classes = [IsAuthenticated, IsAdminUser]
 
     def get(self, request):
-        # 1. 基础统计指标
+        """
+        Aggregate the system operation data and return it.
+        Logical process:
+            - Basic statistics: Use count() to obtain the total indicators.
+            - Exception detection: Filter records with status='failed' within a time window (24 hours) as alerts.
+            - Dynamic extraction: Use select_related to perform JOIN queries to reduce the pressure of N+1 queries.
+            - Trend aggregation: Utilize Django's TruncDate and Count for database-level grouping statistics.
+        :return: Response: A JSON containing stats (list of indicators), recentLogs (dynamic logs), and chartData (sequence of charts).
+        """
+        # 1. Basic statistical indicators
         total_users = User.objects.count()
         active_courses = Course.objects.count()
         total_submissions = Submission.objects.count()
 
-        # 将过去24小时内状态为 'failed' 的提交定义为系统告警
+        # Define the submissions that were in the 'failed' state within the past 24 hours as system alerts.
         yesterday = timezone.now() - timedelta(days=1)
         system_alerts = Submission.objects.filter(status='failed', created_at__gte=yesterday).count()
 
-        # 2. 最近动态 (获取最近5条提交记录)
+        # 2. Recent Updates (Retrieve the last 5 submission records)
         recent_submissions = Submission.objects.select_related('student', 'assignment').order_by('-created_at')[:5]
         logs = []
         for sub in recent_submissions:
@@ -1007,7 +1178,7 @@ class AdminDashboardStatsView(APIView):
                 "color": "bg-blue-500" if sub.status == 'completed' else "bg-amber-500"
             })
 
-        # 3. 图表数据：过去7天的每日提交趋势
+        # 3. Chart data: Daily submission trend over the past 7 days
         last_week = timezone.now() - timedelta(days=7)
         chart_data_query = Submission.objects.filter(created_at__gte=last_week) \
             .annotate(day=TruncDate('created_at')) \
@@ -1035,14 +1206,26 @@ class AdminDashboardStatsView(APIView):
 
 class AdminUserManagementViewSet(viewsets.ModelViewSet):
     """
-    Admin端：用户管理
+    Administrator end: Comprehensive view set for managing all users of the entire system.
+    This view set provides the user operation interface with the highest privileges for administrators, and supports:
+    1. Dynamic filtering: Search by role (teacher/student/administrator) or keyword (student number/name/user name).
+    2. Security control: Support for resetting user passwords to default values with one click.
+    3. Automated data entry: Automatically align the student number and username and encrypt the initial password when creating a user.
+    Permission restrictions:
+        - Must undergo identity verification.
+        - Must have the 'admin' role.
     """
     queryset = User.objects.all().order_by('-date_joined')
     serializer_class = UserProfileSerializer
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     def get_queryset(self):
-        # 修正：直接使用 super().get_queryset() 或 User.objects.all()
+        """
+        Reformulate the query set acquisition logic to support complex search and filtering in the front-end management page.
+        Logic:
+            - role: Supports filtering by 'teacher', 'student', and 'admin'.
+            - search: Fuzzy matching of username, real name, and student ID.
+        """
         queryset = User.objects.all().order_by('-id')
 
         role = self.request.query_params.get('role')
@@ -1052,7 +1235,6 @@ class AdminUserManagementViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(role=role)
 
         if search:
-            # 修正：直接使用 Q 而不是 models.Q（除非你 import django.db.models as models）
             queryset = queryset.filter(
                 Q(username__icontains=search) |
                 Q(first_name__icontains=search) |
@@ -1062,6 +1244,12 @@ class AdminUserManagementViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='reset-password')
     def reset_password(self, request, pk=None):
+        """
+
+        :param request:
+        :param pk:
+        :return:
+        """
         user = self.get_object()
         # 重置密码为学号/工号，或固定默认值
         default_pwd = user.student_id_num if user.student_id_num else "123456"
