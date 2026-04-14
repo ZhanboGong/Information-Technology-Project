@@ -231,31 +231,37 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
     # 这里需要稍作修改，作业与知识点的关系
     def create(self, request, *args, **kwargs):
         """
-        全量覆盖创建逻辑：
-        1. 剥离会导致报错的 JSON 字符串。
-        2. 给序列化器提供伪装后的 Python 对象以通过“必填”校验。
-        3. 保存后手动将真实 JSON 数据注入数据库。
+        Rewrite the creation logic to solve the parsing conflicts of complex JSON fields under Multipart/Form-Data.
+
+        Background:
+        When teachers upload homework attachments (files), the front-end must use FormData format.
+        JSON fields like 'rubric_config' are passed as strings. DRF's JSONField is processing
+        This type of non-standard JSON Payload is vulnerable to format validation failures.
+
+        Solution:
+        1. data hijacking: Copy the 'request.data' and extract the raw JSON string.
+        2. Format spoof: assigning 'rubric_config' and 'reference_logic' legal Python empty objects ({} or []),
+        Make sure the serializer's 'is_valid()' passes the base format validation.
+        3. Correlation recovery: Manually parse the list of 'knowledge_points' ids to meet the requirements of the ManyToMany field.
+        4. Manual compensation: After the instance is saved, parse the raw string using Python's native 'json.loads' and pass it directly
+        Model instances are written to the database, completely bypassing the serializer's parsing limitations.
         """
-        # 1. 拷贝原始数据（FormData 默认不可变）
+        # 1. Copy raw data (FormData is immutable by default)
         data = request.data.copy()
 
-        # 🚀 核心逻辑：提取可能导致 400 错误的字段字符串
-        # 即使前端 stringify 了，DRF 处理 Multipart 数据时也经常会把这里识别为格式错误
+        # Core logic: Extract the field string that may cause a 400 error
         rubric_str = data.get('rubric_config')
         logic_str = data.get('reference_logic')
 
-        # 🚀 核心逻辑：给这几个字段赋“假值”（合法的 Python 对象），骗过 Serializer 的格式校验
-        # 这样它就不会报 "Value must be valid JSON" 了
         data['rubric_config'] = {}
         data['reference_logic'] = []
 
-        # 处理 Knowledge Points (ManyToMany) 的 ID 列表还原
+        # Handle ID list restoration for Knowledge Points (ManyToMany)
         kp_val = data.get('knowledge_points')
         if kp_val and isinstance(kp_val, str):
             try:
                 parsed_kp = json.loads(kp_val)
                 if isinstance(parsed_kp, list):
-                    # 兼容对象数组 [ {id:1}, {id:2} ] 或 ID 数组 [1, 2]
                     if len(parsed_kp) > 0 and isinstance(parsed_kp[0], dict):
                         data.setlist('knowledge_points', [i.get('id') for i in parsed_kp if i.get('id')])
                     else:
@@ -263,43 +269,41 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
             except:
                 pass
 
-        # 2. 实例化并校验（此时 rubric_config 为 {}，必定能通过格式校验）
+        # 2. Instantiate and validate (in this case rubric_config is {}, it must pass the format check)
         serializer = self.get_serializer(data=data)
         if not serializer.is_valid():
-            print("❌ 详细校验失败:", serializer.errors)
+            print("❌ Detailed validation failed:", serializer.errors)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        # 3. 调用保存逻辑 (触发下面的 perform_create)
-        # 这里会处理文件上传(attachment)和基础字段
+        # 3. Calling save logic
         assignment = serializer.save(teacher=self.request.user)
 
-        # 4. 🚀 手动补丁：在数据库层面直接写入真实的 JSON 数据
-        # 绕过 DRF 序列化器的所有解析器，直接使用 Python 原生的 json 库
+        # 4. Bypass all parsers of the DRF serializer and use Python's native json library directly
         try:
             if rubric_str:
-                # 判断：如果是字符串则 loads，如果是对象则直接用
+                # Judgment: loads if it's a string and loads if it's an object
                 assignment.rubric_config = json.loads(rubric_str) if isinstance(rubric_str, str) else rubric_str
             if logic_str:
                 assignment.reference_logic = json.loads(logic_str) if isinstance(logic_str, str) else logic_str
 
-            # 再次处理 knowledge_points 的关联（双重保险）
+            # Handle the association of knowledge_points again (double insurance)
             if kp_val and isinstance(kp_val, str):
                 parsed_kp = json.loads(kp_val)
                 if isinstance(parsed_kp, list) and len(parsed_kp) > 0:
                     ids = [i.get('id') if isinstance(i, dict) else i for i in parsed_kp]
                     assignment.knowledge_points.set(ids)
 
-            # 最终执行 Model 层的保存
+            # The saving of the Model layer is finally performed
             assignment.save()
         except Exception as e:
-            print(f"⚠️ JSON 手动补偿失败: {str(e)}")
+            print(f"⚠️ JSON manually compensates for the failure: {str(e)}")
 
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
     def perform_create(self, serializer):
         """
-        此方法现在变得非常纯粹，只负责最初的实例保存和老师绑定。
+        Responsible for initial instance persistence and binding the current teacher identity.
         """
         serializer.save(teacher=self.request.user)
 
