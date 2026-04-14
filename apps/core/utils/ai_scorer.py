@@ -4,7 +4,7 @@ import time
 from openai import OpenAI
 from dotenv import load_dotenv
 from django.db.models import Q
-from apps.core.models import KnowledgePoint
+from apps.core.models import KnowledgePoint, SystemConfiguration
 from apps.analytics.models import AIServiceLog
 
 # Loading environment variables
@@ -27,11 +27,14 @@ class AIScorer:
         Initialize the DeepSeek client.
         Read the API Key and Base URL from the environment variable.
         """
-        api_key = os.getenv("DEEPSEEK_API_KEY")
-        base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+        config = SystemConfiguration.get_config()
+        self.api_key = config.deepseek_api_key
+        self.base_url = config.deepseek_base_url
+        self.model = config.deepseek_model_name
+
         self.client = OpenAI(
-            api_key=api_key,
-            base_url=base_url
+            api_key=self.api_key,
+            base_url=self.base_url
         )
 
     def ask(self, prompt):
@@ -43,10 +46,14 @@ class AIScorer:
         :param prompt: Text of instructions sent to the AI
         :return: The text returned by AI, or an empty string in the case of an exception.
         """
+        if not self.api_key:
+            raise ValueError("")
         start_time = time.time()
         try:
             response = self.client.chat.completions.create(
-                model="deepseek-chat",
+                model=self.model,
+                temperature=0,
+                top_p=0.1,
                 messages=[
                     {"role": "system", "content": "你是一个专业的后端助手，请根据要求给出简短、准确的回答。"},
                     {"role": "user", "content": prompt}
@@ -213,13 +220,16 @@ class AIScorer:
         start_time = time.time()
         try:
             response = self.client.chat.completions.create(
-                model="deepseek-chat",
+                model=self.model,
                 messages=[
                     {"role": "system",
                      "content": "你是一个严谨的编程评审导师，只输出结构化的 JSON 数据。所有评价使用中文。"},
                     {"role": "user", "content": prompt}
                 ],
-                response_format={'type': 'json_object'}
+                response_format={'type': 'json_object'},
+                temperature=0,
+                top_p=0.1
+                # seed = 42
             )
 
             # 监控日志
