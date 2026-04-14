@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.utils.html import format_html
-from .models import User, Course, KnowledgePoint, Assignment, Submission, DockerReport, AIEvaluation
+from .models import User, Course, KnowledgePoint, Assignment, Submission, DockerReport, AIEvaluation, SystemConfiguration
 
 
 # 1. 定义 Docker 报告的内联显示 (保持只读，增加编译状态显示)
@@ -121,3 +121,19 @@ class AIEvaluationAdmin(admin.ModelAdmin):
     @admin.display(description='提交ID')
     def submission_id(self, obj):
         return obj.submission.id
+
+
+@admin.register(SystemConfiguration)
+class SystemConfigurationAdmin(admin.ModelAdmin):
+    # 限制：不允许添加新记录（只能修改 pk=1 那条）和删除
+    def has_add_permission(self, request):
+        return not SystemConfiguration.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    fieldsets = (
+        ('DeepSeek API 设置', {
+            'fields': ('deepseek_api_key', 'deepseek_base_url', 'deepseek_model_name'),
+        }),
+    )

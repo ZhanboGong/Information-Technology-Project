@@ -55,7 +55,7 @@ class AIScorer:
                 temperature=0,
                 top_p=0.1,
                 messages=[
-                    {"role": "system", "content": "你是一个专业的后端助手，请根据要求给出简短、准确的回答。"},
+                    {"role": "system", "content": "You are a professional backend assistant. Please provide concise and accurate responses in English."},
                     {"role": "user", "content": prompt}
                 ]
             )
@@ -80,7 +80,7 @@ class AIScorer:
                 service_name='deepseek', endpoint='chat.completions/ask',
                 response_time=duration, status_code=500
             )
-            print(f"Error: AIScorer.ask 接口异常: {str(e)}")
+            print(f"Error: AIScorer.ask interface exception: {str(e)}")
             return ""
 
     def _read_project_source(self, project_path):
@@ -128,19 +128,19 @@ class AIScorer:
         :return: The formatted Markdown string is injected as the core of Prompt.
         """
         if not rubric_config or 'items' not in rubric_config:
-            return "根据通用编程规范评分。"
+            return "Grade based on general programming best practices and clean code standards."
 
-        text = "### 严格评分标准与等级细则 (Layer 3)：\n"
+        text = "### Strict Grading Standards and Level Rubrics (Layer 3):\n"
         for item in rubric_config.get('items', []):
-            name = item.get('criterion', '未命名维度')
+            name = item.get('criterion', 'Unnamed Dimension')
             weight = item.get('weight', 0)
-            text += f"\n- 维度: {name} (权重: {weight}%)\n"
+            text += f"\n- Dimension: {name} (Weight: {weight}%)\n"
             detailed = item.get('detailed_rubric')
             if detailed and isinstance(detailed, dict) and any(detailed.values()):
                 for level, desc in detailed.items():
                     if desc: text += f"  * {level}: {desc}\n"
             else:
-                text += f"  要求: {item.get('description', '')}\n"
+                text += f"  Requirement: {item.get('description', '')}\n"
         return text
 
     def evaluate_code(self, submission, docker_report, project_path=None):
@@ -168,7 +168,7 @@ class AIScorer:
                 with open(submission.file.path, 'r', encoding='utf-8', errors='ignore') as f:
                     source_code = f.read()
             except:
-                source_code = "无法读取源代码内容"
+                source_code = "Unable to read source code content."
 
         # 2. 准备上下文与 Rubric 配置
         contexts = self.get_rag_contexts(submission)
@@ -178,42 +178,42 @@ class AIScorer:
 
         # 3. 构造沙箱事实证据
         if not docker_report.compile_status:
-            sandbox_evidence = f"🚨 编译失败：代码未能通过编译。\n错误堆栈：\n{docker_report.stderr}"
+            sandbox_evidence = f"🚨 Compilation Failed: The code did not compile successfully.\nError Stack Trace:\n{docker_report.stderr}"
         else:
-            sandbox_evidence = f"✅ 编译成功，运行输出如下：\nSTDOUT: {docker_report.stdout or '空'}\nSTDERR: {docker_report.stderr or '无'}"
+            sandbox_evidence = f"✅ Execution Successful:\nSTDOUT: {docker_report.stdout or 'Empty'}\nSTDERR: {docker_report.stderr or 'None'}"
 
         # 4. 构造深度评审 Prompt
         prompt = f"""
-        你是一名严谨的 {lang_name} 编程导师。请对学生的作业进行评审。
+        You are a rigorous {lang_name} programming mentor. Please evaluate the student's submission based on the provided evidence and criteria.
 
-        ### 1. 运行事实背景：
+        ### 1. Execution Context (Facts):
         {sandbox_evidence}
 
-        ### 2. 严格评分标准 (Layer 3 - 核心依据)：
+        ### 2. Strict Grading Standards (Rubric - Layer 3):
         {self._build_rubric_description(rubric_config)}
 
-        ### 3. 辅助参考考点 (Layer 1 & 2)：
-        - 系统规范: {contexts['l1']}
-        - 课程能力: {contexts['l2']}
+        ### 3. Knowledge Point Reference (Layer 1 & 2):
+        - System Specifications: {contexts['l1']}
+        - Course Competencies: {contexts['l2']}
 
-        ### 4. 学生源码内容：
+        ### 4. Student Source Code:
         {source_code}
 
-        ### 5. 评审核心指令：
-        1. **详细评分 (scores)**：返回 JSON 的 "scores" 字典中，Key 必须完全匹配老师定义的维度列表: {custom_dim_names}。必须严格参考 Layer 3 中的 F-HD 等级细则进行判定。
-        2. **统计映射 (stats_scores)**：为了系统统计，请务必将上述评审结果映射归类到以下 3 个固定指标 (0-100分)：
-           - Logic: 业务逻辑正确性、功能完成度、编译事实。
-           - Design: 架构设计、OOP 原则应用、类关系。
-           - Style: 命名规范、注释、代码整洁度。
-        3. **知识点画像 (kp_scores)**：必须严格匹配以下列表评估掌握度: {contexts['allowed_labels']}。
+        ### 5. Review Instructions:
+        1. **Detailed Scoring (scores)**: The keys in the "scores" dictionary MUST exactly match these dimension names: {custom_dim_names}. Evaluate strictly based on the Level Rubrics provided in Layer 3.
+        2. **Statistical Mapping (stats_scores)**: Map your findings into these 3 fixed system metrics (0-100):
+            - Logic: Correctness, functional completeness, and execution facts.
+            - Design: Architecture, OOP principles, and class relationships.
+            - Style: Naming conventions, comments, and code cleanliness.
+        3. **Knowledge Profiling (kp_scores)**: You MUST evaluate mastery levels strictly using these provided labels: {contexts['allowed_labels']}. Do not create new labels.
 
-        请严格返回以下格式的 JSON：
+        Return a strictly formatted JSON object:
         {{
-            "scores": {{ "维度名": 分数 }},
-            "stats_scores": {{ "Logic": 分数, "Design": 分数, "Style": 分数 }},
-            "kp_scores": {{ "知识点名": 分数 }},
-            "total_score": 总分,
-            "feedback": "## 运行诊断 \\n... ## 逻辑建议 \\n... (使用中文回复)"
+            "scores": {{ "Dimension Name": score }},
+            "stats_scores": {{ "Logic": score, "Design": score, "Style": score }},
+            "kp_scores": {{ "Knowledge Point Name": score }},
+            "total_score": total_score_value,
+            "feedback": "## Diagnostic \\n... ## Suggestions \\n... (Please respond in professional English)"
         }}
         """
 
@@ -223,7 +223,7 @@ class AIScorer:
                 model=self.model,
                 messages=[
                     {"role": "system",
-                     "content": "你是一个严谨的编程评审导师，只输出结构化的 JSON 数据。所有评价使用中文。"},
+                     "content": "You are a rigorous programming mentor. Output ONLY structured JSON data. All evaluation and feedback MUST be in English."},
                     {"role": "user", "content": prompt}
                 ],
                 response_format={'type': 'json_object'},
@@ -245,7 +245,7 @@ class AIScorer:
             duration = time.time() - start_time
             AIServiceLog.objects.create(service_name='deepseek', endpoint='chat.completions/evaluate',
                                         response_time=duration, status_code=500)
-            raise Exception(f"AI 评审引擎通信失败: {str(e)}")
+            raise Exception(f"AI Evaluation Engine communication failed: {str(e)}")
 
     def get_rag_contexts(self, submission):
         """
@@ -272,5 +272,5 @@ class AIScorer:
             else:
                 l2 += detail
         task_points = "\n".join(
-            [f"- {p}" for p in assignment.reference_logic]) if assignment.reference_logic else "常规业务实现"
-        return {'l1': l1 or "遵循标准规范", 'l2': l2 or "掌握课程目标", 'l3': task_points, 'allowed_labels': allowed}
+            [f"- {p}" for p in assignment.reference_logic]) if assignment.reference_logic else "Standard functional implementation."
+        return {'l1': l1 or "Follow standard coding conventions", 'l2': l2 or "Demonstrate mastery of course objectives.", 'l3': task_points, 'allowed_labels': allowed}

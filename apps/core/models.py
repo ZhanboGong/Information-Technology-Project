@@ -1,6 +1,8 @@
 from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.conf import settings
+from django.core.cache import cache
+
 
 # User Table
 class User(AbstractUser):
@@ -20,6 +22,7 @@ class User(AbstractUser):
     def __str__(self):
         return f"{self.username} ({self.get_role_display()})"
 
+
 # Course Table
 class Course(models.Model):
     """
@@ -34,6 +37,7 @@ class Course(models.Model):
 
     def __str__(self):
         return self.name
+
 
 # KnowledgePoint Table
 class KnowledgePoint(models.Model):
@@ -56,6 +60,7 @@ class KnowledgePoint(models.Model):
     def __str__(self):
         return f"[{self.category}] {self.name}"
 
+
 # 4. Assessment Table
 class Assignment(models.Model):
     """
@@ -76,9 +81,16 @@ class Assignment(models.Model):
     category = models.CharField(max_length=50, default='basic', verbose_name="难度分类")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    attachment = models.FileField(
+        upload_to='assignments/attachments/%Y/%m/%d/',
+        null=True,
+        blank=True,
+        verbose_name="作业附件"
+    )
 
     def __str__(self):
         return self.title
+
 
 # 5. Submission Table
 class Submission(models.Model):
@@ -97,6 +109,7 @@ class Submission(models.Model):
     final_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+
 # 6. Docker Report Table
 class DockerReport(models.Model):
     submission = models.OneToOneField('Submission', on_delete=models.CASCADE, related_name='docker_report')
@@ -107,6 +120,7 @@ class DockerReport(models.Model):
     execution_time = models.FloatField(null=True)
     status = models.CharField(max_length=20, default='success')
     created_at = models.DateTimeField(auto_now_add=True)
+
 
 # 7. AI Evaluation Report Table
 class AIEvaluation(models.Model):
@@ -127,3 +141,38 @@ class AIEvaluation(models.Model):
     teacher_reviewed = models.BooleanField(default=False)
     raw_response = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+
+# 8. System Configuration
+class SystemConfiguration(models.Model):
+    """系统全局配置（单例模式）"""
+    deepseek_api_key = models.CharField(max_length=255, default="sk-f532188d5dd5436a920de5b44b1f9596", verbose_name="DeepSeek API Key", blank=True)
+    deepseek_base_url = models.URLField(default="https://api.deepseek.com", verbose_name="DeepSeek Base URL")
+    deepseek_model_name = models.CharField(max_length=100, default="deepseek-chat", verbose_name="模型名称")
+
+    # 可以在这里添加其他设置，比如：
+    # max_tokens = models.IntegerField(default=2000)
+    # temperature = models.FloatField(default=0.7)
+
+    class Meta:
+        verbose_name = "系统全局配置"
+        verbose_name_plural = "系统全局配置"
+
+    def save(self, *args, **kwargs):
+        # 确保只有一条记录
+        self.pk = 1
+        super().save(*args, **kwargs)
+        # 更新后清除缓存，确保下次读取到最新值
+        cache.delete('system_config')
+
+    @classmethod
+    def get_config(cls):
+        """高效获取配置的方法（带缓存）"""
+        config = cache.get('system_config')
+        if not config:
+            config, created = cls.objects.get_or_create(pk=1)
+            cache.set('system_config', config, 3600)  # 缓存1小时
+        return config
+
+    def __str__(self):
+        return "系统全局配置"

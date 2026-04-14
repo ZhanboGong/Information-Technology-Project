@@ -1,5 +1,6 @@
+import json
 from rest_framework import serializers
-from .models import User, Assignment, Submission, Course, AIEvaluation, KnowledgePoint, DockerReport
+from .models import User, Assignment, Submission, Course, AIEvaluation, KnowledgePoint, DockerReport, SystemConfiguration
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 
@@ -63,33 +64,73 @@ class CourseSerializer(serializers.ModelSerializer):
 
 # --- 5. Assessment serializer ---
 class AssignmentSerializer(serializers.ModelSerializer):
-    """
-    Assessment detail serializer.
-    The nested design is used to completely package the job configuration information with the associated knowledge point metadata.
-    """
+    # 你声明了它
     course_name = serializers.ReadOnlyField(source='course.name')
     kp_details = KnowledgePointSerializer(source='knowledge_points', many=True, read_only=True)
+    attachment_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Assignment
+        # 🚀 必须确保 course_name 出现在这个 fields 列表里！
         fields = [
-            'id', 'title', 'content', 'course', 'course_name',
-            'deadline', 'rubric_config', 'max_attempts',
-            'reference_logic', 'knowledge_points', 'kp_details',
-            'category', 'created_at'
+            'id',
+            'title',
+            'course_name',  # <--- 检查并添加这一行
+            'content',
+            'course',
+            'deadline',
+            'rubric_config',
+            'max_attempts',
+            'reference_logic',
+            'knowledge_points',
+            'kp_details',   # <--- 顺便检查它是否也漏掉了
+            'teacher',
+            'category',
+            'attachment',
+            'attachment_name',
+            'created_at',
+            'updated_at'
         ]
+        read_only_fields = ['teacher', 'created_at', 'updated_at']
+
+    def get_attachment_name(self, obj):
+        if obj.attachment:
+            import os
+            return os.path.basename(obj.attachment.name)
+        return None
 
 
 # --- 6. AI evaluation result serializer ---
 class AIEvaluationSimpleSerializer(serializers.ModelSerializer):
-    """
-    Single-pass evaluation feedback serializer.
-    Focus on showing specific rating facts and AI feedback for a particular submission.
-    """
+    ai_raw_feedback_data = serializers.SerializerMethodField()
+
     class Meta:
         model = AIEvaluation
-        # Note: total_score here is the score for a single commit
-        fields = ['total_score', 'feedback', 'scores', 'kp_scores', 'raw_sandbox_output', 'is_published']
+        fields = [
+            'id',
+            'total_score',
+            'ai_raw_score',      # 建议加上：AI原始分
+            'feedback',
+            'scores',
+            'kp_scores',
+            'is_published',
+            'teacher_reviewed',  # 建议加上：老师是否已审阅
+            'ai_raw_feedback',
+            'ai_raw_feedback_data',
+            'raw_sandbox_output',
+            'created_at'
+        ]
+
+    def get_ai_raw_feedback_data(self, obj):
+        if not obj.ai_raw_feedback:
+            return None
+        try:
+            # 尝试将 TextField 里的字符串转为 Python 对象发送
+            # 这样前端直接拿到的就是 Object，不需要再 JSON.parse
+            return json.loads(obj.ai_raw_feedback)
+        except (json.JSONDecodeError, TypeError):
+            # 如果不是标准的 JSON 格式（比如存的是纯提示文本），则返回原始文本
+            return obj.ai_raw_feedback
 
 
 # --- 7. Docker Report Serializer ---
@@ -158,14 +199,46 @@ class SubmissionSerializer(serializers.ModelSerializer):
 
 
 class UserProfileSerializer(serializers.ModelSerializer):
-    """用于修改个人资料的序列化器"""
+    """用于管理员管理用户和用户查看个人资料的通用序列化器"""
+
     class Meta:
         model = User
-        # 允许修改的字段（不要包含 role 或 student_id_num 等关键字段，防止越权）
-        fields = ['id', 'username', 'first_name', 'last_name', 'email', 'class_name']
-        read_only_fields = ['username'] # 通常学号/用户名不准修改
+        # 包含模型中定义的所有关键字段
+        fields = [
+            'id',
+            'username',
+            'first_name',
+            'email',
+            'role',
+            'student_id_num',
+            'is_active',
+            'class_name',
+            'date_joined'
+        ]
+
+        # 将 username 设为只读，因为它是登录账号，通常不建议频繁修改
+        # 如果你希望管理员能改 username，就把下面这行去掉
+        read_only_fields = ['id', 'date_joined']
+
+    def __init__(self, *args, **kwargs):
+        # 动态处理权限：如果不是管理员，强制锁定关键字段
+        super(UserProfileSerializer, self).__init__(*args, **kwargs)
+        request = self.context.get('request')
+
+        if request and request.user and request.user.role != 'admin':
+            # 普通用户不能修改 角色、学号、激活状态
+            self.fields['role'].read_only = True
+            self.fields['student_id_num'].read_only = True
+            self.fields['is_active'].read_only = True
+            self.fields['username'].read_only = True
 
 class ChangePasswordSerializer(serializers.Serializer):
     """用于修改密码的序列化器"""
     old_password = serializers.CharField(required=True)
     new_password = serializers.CharField(required=True)
+
+
+class SystemConfigurationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SystemConfiguration
+        fields = ['deepseek_api_key', 'deepseek_base_url', 'deepseek_model_name']

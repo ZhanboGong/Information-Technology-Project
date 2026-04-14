@@ -11,8 +11,16 @@ from .ai_scorer import AIScorer
 
 class GradingPipeline:
     """
-    自动化批改流水线核心控制类。
-    负责协调 Docker 沙箱运行、AI 语义评分以及成绩同步。
+    Automatic correction pipeline core control class.
+
+    This class coordinates code execution, semantic scoring, and data persistence.
+    It is not only a business logic class, but also a state machine manager that ensures Submission.
+    Flow smoothly from 'pending' to 'completed' or 'failed'.
+
+    Attributes:
+    submission: This is the currently pending Submission object.
+    runner (DockerRunner): Docker sandbox execution engine instance
+    scorer (AIScorer): AI scoring engine instance.
     """
 
     def __init__(self, submission_id):
@@ -25,9 +33,18 @@ class GradingPipeline:
 
     def run_full_pipeline(self, entry_point=None, work_dir=None):
         """
-        执行完整的自动化批改流程。
+        Implement a complete automated correction pipeline.
+
+        Adopt a phased strategy:
+        1. State locking: Immediately change the state to 'running' to avoid concurrent conflicts.
+        2. Fact fetching (Stage 1) : Run the code in the sandbox to get objective runtime output and exit codes.
+        3. Semantic evaluation (Stage 2) : AI generates subjective ratings and feedback by combining source code and runtime facts.
+        Exception isolation: Catch full-link exceptions to ensure that the pipeline correctly flags task failures when it crashes.
+        :param entry_point: The entry file path for the project to run.
+        :param work_dir: Temporary working directory after unzipped source code.
+        :return:
         """
-        print(f"--- 启动自动化批改流水线: Submission {self.submission.id} ---")
+        print(f"--- Start the automated correction pipeline: Submission {self.submission.id} ---")
 
         # 状态锁定：防止重复执行
         self.submission.status = 'running'
@@ -48,7 +65,12 @@ class GradingPipeline:
 
     def run_stage_one_docker(self, entry_point=None, work_dir=None):
         """
-        第一阶段：通过 DockerRunner 捕获代码运行的真实数据。
+        Phase 1: Collection of factual evidence.
+        Invoke DockerRunner to run the code in an isolated container. The captured results (such as stdout, exit_code, etc.)
+        will be stored as "undeniable facts" in DockerReport, for reference by the second-stage AI review.
+        :param entry_point: The entry file of the code
+        :param work_dir: Source working directory path.
+        :return: Sandbox run report after persistence.
         """
         target_file = entry_point if entry_point else self.submission.file.path
         docker_res = self.runner.run_code(
