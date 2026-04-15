@@ -631,14 +631,25 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'], url_path='submissions')
     def get_submissions(self, request, pk=None):
-        """"""
+        """
+        Retrieve the list of all student submission records for the specified assignment.
+        This interface is mainly used for the "submission list" table on the teacher's end homework detail page.
+        Design Focus:
+        1. Performance Optimization: By using `select_related` to associate the `student` and `ai_evaluation` tables in one go,
+        the original N+1 queries are optimized to a single SQL JOIN query.
+        2. Data Anonymization: Only return the key fields required for the front-end table display, protecting student privacy and reducing network bandwidth.
+        3. Logical Robustness: Using `hasattr` for compatible handling of submission records that have not yet undergone AI scoring, preventing AttributeError caused by OneToOne association missing.
+        :param request: DRF Request Object.
+        :param pk: The primary key ID of the assignment.
+        :return: A list including student information, submission status, attempt count and AI feedback.
+        """
         assignment = self.get_object()
-        # 获取该作业的所有提交，并预加载学生信息和 AI 评价
+        # Obtain all submissions for this assignment, and preload student information and AI evaluations.
         submissions = Submission.objects.filter(assignment=assignment) \
             .select_related('student', 'ai_evaluation') \
             .order_by('-created_at')
 
-        # 序列化数据（你可以直接手动构造 List，或者使用 SubmissionSerializer）
+        # Serialized data
         data = []
         for sub in submissions:
             data.append({
