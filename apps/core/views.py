@@ -736,13 +736,10 @@ class KnowledgePointViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
     def perform_create(self, serializer):
-        # 如果是老师创建，可以根据需求在这里自动补充逻辑（可选）
         serializer.save()
 
-    # 也可以增加一个过滤逻辑，让老师默认只能看到自己课程的 KP
     def get_queryset(self):
         qs = super().get_queryset()
-        # 如果不是管理员，根据课程过滤（可选，取决于你的设计意图）
         return qs
 
 
@@ -916,12 +913,17 @@ class TeacherStudentManagementViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'], url_path='download-template')
     def download_template(self, request):
         """
-        提供学生导入模板下载
+        Provide downloadable Excel templates for batch import of student data.
+        Business Logic:
+        1. Standardization First: Define the standard column headers that the system can recognize (student_id, name, class).
+        2. Example Guidance: Pre-fill a few rows of sample data in the template to visually inform the user of the filling guidelines.
+        3. Memory Generation: Utilize `io.BytesIO` and `pandas` to directly construct the file stream in the server's memory,
+        without generating temporary files on the disk, thereby enhancing concurrent processing capabilities.
+        4. Response Alignment: Set the correct MIME type and Content-Disposition to ensure that the browser directly triggers the download.
+        :return: HttpResponse: An Excel template file with preset column headers.
         """
-        # 定义模板表头（需与 import_students 中的逻辑对应）
         columns = ['student_id', 'name', 'class']
 
-        # 创建示例数据（可选，给用户参考）
         sample_data = [
             ['20260001', 'John Doe', 'Class A'],
             ['20260002', 'Jane Smith', 'Class B']
@@ -929,14 +931,12 @@ class TeacherStudentManagementViewSet(viewsets.ViewSet):
 
         df = pd.DataFrame(sample_data, columns=columns)
 
-        # 使用 BytesIO 在内存中生成 Excel
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Students')
 
         output.seek(0)
 
-        # 构造响应
         filename = "student_import_template.xlsx"
         response = HttpResponse(
             output.read(),
@@ -1370,17 +1370,23 @@ class AdminUserManagementViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], url_path='reset-password')
     def reset_password(self, request, pk=None):
         """
-
-        :param request:
-        :param pk:
-        :return:
+        Reset the login password for the specified user.
+        Business logic:
+        1. Dynamic credential: The password is automatically reset to the user's `student_id_num` (student ID/work ID).
+        2. Secure fallback: If the user record lacks the student ID information (such as special management administrator accounts), it is uniformly reset to "123456".
+        3. State persistence: The `set_password` function is called to ensure that the new password is encrypted and hashed using Django's built-in PBKDF2 algorithm and then stored in the database.
+        Permission requirements:
+            - Only accessible to users with administrator privileges.
+        :param request: DRF Request Object.
+        :param pk: The primary key ID of the target user.
+        :return: It includes the reset password prompt information that has been modified.
         """
         user = self.get_object()
-        # 重置密码为学号/工号，或固定默认值
+        # Reset the password using the student ID / employee number.
         default_pwd = user.student_id_num if user.student_id_num else "123456"
         user.set_password(default_pwd)
         user.save()
-        return Response({"message": f"密码已重置为: {default_pwd}"})
+        return Response({"message": f"The password has been reset to: {default_pwd}"})
 
     def perform_create(self, serializer):
         """
