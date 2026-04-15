@@ -672,15 +672,25 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'], url_path='student-best')
     def get_student_best_performance(self, request, pk=None):
         """
-        获取指定学生在某次作业中的最高分记录及详细 AI 评价
+        Obtain the detailed information about the "best performance" of a specific student in the current assignment.
+        This interface is mainly used for teachers to view the highest score records of students and their complete AI evaluation reports.
+        Logical steps:
+        1. Target identification: Obtain the current subject being worked on and the student ID specified in the request.
+        2. Selective filtering: From all the attempts of this student, prioritize the records with a status of 'completed' and the highest `final_score`. If the scores are the same, select the one with the larger ID (i.e., the most recent one).
+        3. Data extraction: Safely extract the associated AI assessment (AIEvaluation) data.
+        4. Field alignment: Include detailed knowledge comment scores (kp_scores), feedback content, and the teacher's review status.
+        :param request: The student_id needs to be included in the query_params.
+        :param pk: The ID of the assignment.
+        :return: A JSON dictionary containing the highest score submission records and detailed evaluation information.
         """
+        # Automatically verify job permissions and obtain instances
         assignment = self.get_object()
         student_id = request.query_params.get('student_id')
 
         if not student_id:
-            return Response({"error": "需要 student_id"}, status=400)
+            return Response({"error": "need student_id"}, status=400)
 
-        # 1. 查找最高分 Submission
+        # 1. Search for the highest score Submission
         best_sub = Submission.objects.filter(
             assignment=assignment,
             student_id=student_id,
@@ -688,16 +698,15 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         ).order_by('-final_score', '-id').first()
 
         if not best_sub:
-            return Response({"message": "该学生尚未完成提交"}, status=404)
+            return Response({"message": "This student has not yet completed the submission."}, status=404)
 
-        # 2. 获取对应的 AIEvaluation
-        # 使用 hasattr 或 try-except 确保鲁棒性
+        # 2. Obtain the corresponding AIEvaluation
         evaluation_data = None
         if hasattr(best_sub, 'ai_evaluation'):
             eval_obj = best_sub.ai_evaluation
             evaluation_data = {
                 "total_score": float(eval_obj.total_score),
-                "kp_scores": eval_obj.kp_scores,  # 假设你模型里有这个字段
+                "kp_scores": eval_obj.kp_scores,
                 "feedback": eval_obj.feedback,
                 "ai_raw_feedback": eval_obj.ai_raw_feedback,
                 "is_published": eval_obj.is_published,
