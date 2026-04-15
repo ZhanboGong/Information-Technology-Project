@@ -296,7 +296,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
             # The saving of the Model layer is finally performed
             assignment.save()
         except Exception as e:
-            print(f"⚠️ JSON manually compensates for the failure: {str(e)}")
+            print(f"JSON manually compensates for the failure: {str(e)}")
 
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
@@ -309,39 +309,67 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
     def update(self, request, *args, **kwargs):
         """
-        全量覆盖修改逻辑，复用创建时的 JSON 补丁逻辑
+        Logic: Resolves JSON parsing in FormData mode and ManyToMany synchronization.
+
+        Design core:
+        In a PUT/PATCH operation, if the frontend uses FormData to upload a new file,
+        DRF can't parse nested JSON strings directly. By manually intervening in the data stream,
+        Bypass the automatic parsing restrictions of the Serializer.
+
+        Logical steps:
+        1. Data hijacking: Copy the request data and extract the raw JSON string and the list of knowledge point ids.
+        2. Validation bypass: Injecting fake values (empty object/list) into 'data' ensures that the underlying field passes the serializer format validation.
+        3. Basic updates: Call 'serializer.save()' to persist basic fields such as title, time, attachment, etc.
+        4. Manual overwriting: Parse complex fields with native 'json.loads' and use' assignment.knowledge_points.set() '
+        Explicitly synchronizing many-to-many relationships ensures that changes take effect immediately.
         """
-        partial = kwargs.pop('partial', False)
+        partial = kwargs.pop('partial', True)
         instance = self.get_object()
 
-        # 1. 准备数据拷贝
+        # 1. Copy and hijack data
         data = request.data.copy()
-
-        # 提取真实 JSON 字符串用于后续手动注入
         rubric_str = data.get('rubric_config')
         logic_str = data.get('reference_logic')
 
-        # 2. 赋予假值以通过 Serializer 校验
         data['rubric_config'] = {}
         data['reference_logic'] = []
 
-        # 处理 ManyToMany 知识点
         kp_val = data.get('knowledge_points')
+        kp_ids = []
         if kp_val and isinstance(kp_val, str):
             try:
                 parsed_kp = json.loads(kp_val)
-                data.setlist('knowledge_points', [i.get('id') if isinstance(i, dict) else i for i in parsed_kp])
+                # Compatible with multiple front-end value passing formats: [1,2] or [{id:1}, {id:2}]
+                kp_ids = [i.get('id') if isinstance(i, dict) else i for i in parsed_kp]
+                data.setlist('knowledge_points', kp_ids)
             except:
                 pass
 
-        # 3. 校验并保存基础字段
+        # 2. Validate and save the underlying fields (title, date, etc.)
         serializer = self.get_serializer(instance, data=data, partial=partial)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         assignment = serializer.save()
 
-        # 4. 手动注入真实的 JSON 数据
+        # 3. Manually forced injection of real JSON and M2M data
+        try:
+            if rubric_str:
+                assignment.rubric_config = json.loads(rubric_str) if isinstance(rubric_str, str) else rubric_str
+            if logic_str:
+                assignment.reference_logic = json.loads(logic_str) if isinstance(logic_str, str) else logic_str
+
+            # Manually synchronize the ManyToMany relationship
+            if kp_ids:
+                assignment.knowledge_points.set(kp_ids)
+
+            assignment.save()
+        except Exception as e:
+            print(f"⚠️ Update JSON/M2M Patch Error: {e}")
+
+        return Response(serializer.data)
+
+        # 4. Manually inject real JSON data
         try:
             if rubric_str:
                 assignment.rubric_config = json.loads(rubric_str) if isinstance(rubric_str, str) else rubric_str
@@ -659,16 +687,26 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
 
 
-class KnowledgePointViewSet(viewsets.ReadOnlyModelViewSet):
+class KnowledgePointViewSet(viewsets.ModelViewSet):
     """
     Knowledge point dictionary query view set.
     The interface acts as a common dictionary table that allows all log in users, teachers and students, to view a list of knowledge points within the system.
     Since it is only used for data retrieval, ReadOnlyModelViewSet is used to disable all additions, deletions and changes.
     Permission Restrictions: Restrict access to IsAuthenticated users only.
     """
-    queryset = KnowledgePoint.objects.all()
+    queryset = KnowledgePoint.objects.all().order_by("-id")
     serializer_class = KnowledgePointSerializer
     permission_classes = [permissions.IsAuthenticated]
+
+    def perform_create(self, serializer):
+        # 如果是老师创建，可以根据需求在这里自动补充逻辑（可选）
+        serializer.save()
+
+    # 也可以增加一个过滤逻辑，让老师默认只能看到自己课程的 KP
+    def get_queryset(self):
+        qs = super().get_queryset()
+        # 如果不是管理员，根据课程过滤（可选，取决于你的设计意图）
+        return qs
 
 
 class TeacherCourseViewSet(viewsets.ModelViewSet):
@@ -701,7 +739,7 @@ class TeacherCourseViewSet(viewsets.ModelViewSet):
         :return:
         """
         # Force the teacher field of the course to be the current logged-in user
-        serializer.save(teacher=self.request.user)
+        serializer.save()
 
     @action(detail=True, methods=['get'], url_path='students')
     def enrolled_students(self, request, pk=None):
@@ -837,6 +875,38 @@ class TeacherStudentManagementViewSet(viewsets.ViewSet):
             import traceback
             traceback.print_exc()
             return Response({"error": f"Failed table parsing: {str(e)}"}, status=400)
+
+    @action(detail=False, methods=['get'], url_path='download-template')
+    def download_template(self, request):
+        """
+        提供学生导入模板下载
+        """
+        # 定义模板表头（需与 import_students 中的逻辑对应）
+        columns = ['student_id', 'name', 'class']
+
+        # 创建示例数据（可选，给用户参考）
+        sample_data = [
+            ['20260001', 'John Doe', 'Class A'],
+            ['20260002', 'Jane Smith', 'Class B']
+        ]
+
+        df = pd.DataFrame(sample_data, columns=columns)
+
+        # 使用 BytesIO 在内存中生成 Excel
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Students')
+
+        output.seek(0)
+
+        # 构造响应
+        filename = "student_import_template.xlsx"
+        response = HttpResponse(
+            output.read(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
 
 
 # Student Side View
