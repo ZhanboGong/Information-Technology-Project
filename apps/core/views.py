@@ -1390,14 +1390,19 @@ class AdminUserManagementViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         """
-        在保存用户前，进行业务逻辑处理：
-        1. 默认密码设为学号/工号
-        2. 如果没传 student_id_num，默认密码设为 123456
+        Executing the business interception logic before performing user persistence.
+        This method overrides the saving behavior of ModelViewSet, aiming to implement the following automated business rules:
+        1. Account standardization: The `username` field is forcibly synchronized to `student_id_num` (student ID). This complies with the login design where "student ID" serves as the account, preventing students from being unable to log in due to forgetting to set a custom username.
+        2. Initial password preset:
+            - The student ID is prioritized as the initial password to enhance individual distinction.
+            - If the student ID is missing (an extremely rare case), it defaults to the common default value "123456".
+        3. Security enhancement: The initial password is encrypted using the Django underlying hashing algorithm through the `make_password` call.
+        :param serializer: An instance of UserProfileSerializer that has passed the format check.
+        :return:
         """
         student_id = self.request.data.get('student_id_num', '')
         password = make_password(student_id if student_id else "123456")
 
-        # 强制将 username 设为 student_id_num (符合你登录系统的设计)
         serializer.save(
             password=password,
             username=student_id if student_id else serializer.validated_data.get('username')
