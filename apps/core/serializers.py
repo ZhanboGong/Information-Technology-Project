@@ -45,7 +45,7 @@ class KnowledgePointSerializer(serializers.ModelSerializer):
     """
     class Meta:
         model = KnowledgePoint
-        fields = ['id', 'name', 'category', 'is_system', 'description']
+        fields = ['id', 'name', 'category', 'is_system', 'language', 'description', 'course']
 
 
 # --- 4. The course serializer ---
@@ -56,10 +56,12 @@ class CourseSerializer(serializers.ModelSerializer):
     """
     student_count = serializers.IntegerField(source='students.count', read_only=True)
     teacher_name = serializers.ReadOnlyField(source='teacher.username')
+    teacher = serializers.HiddenField(default=serializers.CurrentUserDefault())
 
     class Meta:
         model = Course
         fields = ['id', 'name', 'description', 'teacher', 'teacher_name', 'student_count', 'created_at']
+        read_only_fields = ['id', 'created_at']
 
 
 # --- 5. Assessment serializer ---
@@ -71,11 +73,10 @@ class AssignmentSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Assignment
-        # 🚀 必须确保 course_name 出现在这个 fields 列表里！
         fields = [
             'id',
             'title',
-            'course_name',  # <--- 检查并添加这一行
+            'course_name',
             'content',
             'course',
             'deadline',
@@ -83,7 +84,7 @@ class AssignmentSerializer(serializers.ModelSerializer):
             'max_attempts',
             'reference_logic',
             'knowledge_points',
-            'kp_details',   # <--- 顺便检查它是否也漏掉了
+            'kp_details',
             'teacher',
             'category',
             'attachment',
@@ -109,12 +110,12 @@ class AIEvaluationSimpleSerializer(serializers.ModelSerializer):
         fields = [
             'id',
             'total_score',
-            'ai_raw_score',      # 建议加上：AI原始分
+            'ai_raw_score',
             'feedback',
             'scores',
             'kp_scores',
             'is_published',
-            'teacher_reviewed',  # 建议加上：老师是否已审阅
+            'teacher_reviewed',
             'ai_raw_feedback',
             'ai_raw_feedback_data',
             'raw_sandbox_output',
@@ -125,11 +126,8 @@ class AIEvaluationSimpleSerializer(serializers.ModelSerializer):
         if not obj.ai_raw_feedback:
             return None
         try:
-            # 尝试将 TextField 里的字符串转为 Python 对象发送
-            # 这样前端直接拿到的就是 Object，不需要再 JSON.parse
             return json.loads(obj.ai_raw_feedback)
         except (json.JSONDecodeError, TypeError):
-            # 如果不是标准的 JSON 格式（比如存的是纯提示文本），则返回原始文本
             return obj.ai_raw_feedback
 
 
@@ -203,7 +201,6 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        # 包含模型中定义的所有关键字段
         fields = [
             'id',
             'username',
@@ -216,24 +213,29 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'date_joined'
         ]
 
-        # 将 username 设为只读，因为它是登录账号，通常不建议频繁修改
-        # 如果你希望管理员能改 username，就把下面这行去掉
         read_only_fields = ['id', 'date_joined']
 
     def __init__(self, *args, **kwargs):
-        # 动态处理权限：如果不是管理员，强制锁定关键字段
         super(UserProfileSerializer, self).__init__(*args, **kwargs)
         request = self.context.get('request')
 
         if request and request.user and request.user.role != 'admin':
-            # 普通用户不能修改 角色、学号、激活状态
             self.fields['role'].read_only = True
             self.fields['student_id_num'].read_only = True
             self.fields['is_active'].read_only = True
             self.fields['username'].read_only = True
 
 class ChangePasswordSerializer(serializers.Serializer):
-    """用于修改密码的序列化器"""
+    """
+    Modify the password-specific serializer.
+
+    This serializer is not directly associated with the database model and is only used to validate what the user submitted in the Change password interface
+    The format and existence of old_password and new_password.
+
+    Validation logic:
+        -old_password: This is a required field used by the backend to validate the user's identity.
+        -new_password: Required, new credentials the user wishes to set.
+    """
     old_password = serializers.CharField(required=True)
     new_password = serializers.CharField(required=True)
 
