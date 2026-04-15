@@ -531,7 +531,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         except Course.DoesNotExist:
             return Response({"error": "The specified course does not exist."}, status=404)
         except json.JSONDecodeError:
-            print(f"❌ Failed to parse AI response: {raw_res}")
+            print(f"Failed to parse AI response: {raw_res}")
             return Response({"error": "AI returned an invalid format. Please try again."}, status=500)
         except Exception as e:
             print(f"AI KP Generation Error: {str(e)}")
@@ -539,28 +539,39 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='download-submission')
     def download_single_submission(self, request):
+        """
+        Intelligently download a single student's highest score submission.
+
+        Business logic:
+        1. Link locating: Find the student and the assignment given the submission_id.
+        2. The best algorithm: among all attempts of the same student on the assignment, according to "teacher final score > AI assessment score > latest ID"
+        The priority of automatically filters out the best performing records.
+        3. Standard naming: the downloaded file name will automatically contain "student number _ name _ number of attempts _ score", which is greatly convenient for teachers to read offline.
+        :param request: The submission_id parameter is included.
+        :return: The best version of the job file flow.
+        """
         submission_id = request.query_params.get('submission_id')
         if not submission_id:
-            return Response({"error": "缺少 submission_id 参数"}, status=400)
+            return Response({"error": "submission_id parameter is missing"}, status=400)
 
         try:
-            # 1. 先定位到这条提交记录
+            # 1.  locate the commit record
             original_sub = Submission.objects.get(id=submission_id, assignment__teacher=request.user)
 
-            # 2. 核心逻辑：寻找该学生在该作业下的最高分记录
-            # 排序逻辑：优先看教师分，其次 AI 分，最后 ID (取最新的)
+            # 2. Find the student's highest score for that assignment
+            # Sorting logic: teacher score first, AI score second, and ID last (take the latest)
             best_submission = Submission.objects.filter(
                 student=original_sub.student,
                 assignment=original_sub.assignment
             ).order_by('-final_score', '-ai_evaluation__total_score', '-id').first()
 
             if not best_submission:
-                best_submission = original_sub  # 保底方案
+                best_submission = original_sub
 
             file_handle = best_submission.file.open()
             ext = os.path.splitext(best_submission.file.name)[1]
 
-            # 构造文件名：学号_姓名_第X次尝试_分数
+            # Construct filename: Student number_name_xth try_ score
             score_val = best_submission.final_score if best_submission.final_score else "AI评"
             filename = f"{best_submission.student.student_id_num}_{best_submission.student.first_name}_Attempt{best_submission.attempt_number}_Score{score_val}{ext}"
 
@@ -568,19 +579,27 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
             response['Content-Disposition'] = f"attachment; filename*=utf-8''{escape_uri_path(filename)}"
             return response
         except Submission.DoesNotExist:
-            return Response({"error": "未找到记录或无权访问"}, status=404)
+            return Response({"error": "No record found or no access granted"}, status=404)
 
     @action(detail=True, methods=['get'], url_path='download-all')
     def download_all_submissions(self, request, pk=None):
+        """
+        Batch download the highest-scoring assignments of all students (in a ZIP compressed file).
+        Business logic:
+        1. Full scan: Retrieve all submission records of all students under this assignment.
+        2. Memory deduplication: Utilize the sorting feature (after sorting in SQL and then taking the first record for each student in the loop), to efficiently filter out the "best version" of each student in the class.
+        3. Memory compression: Use BytesIO to directly generate a ZIP package in memory, avoiding the generation of server disk fragmentation.
+        4. Archiving and renaming: The file names within the ZIP contain student ID, name, number of times and score, facilitating teachers to batch import or offline backup.
+        :return: HttpResponse: A ZIP file containing the highest-scoring assignment of the entire class.
+        """
         assignment = self.get_object()
 
-        # 1. 核心筛选逻辑：找到每个学生分值最高的提交 ID 列表
-        # 我们先按学生、分数倒序、ID 倒序排列所有提交
+        # 1. Core filtering logic: Find the list of submitted ids with the highest score for each student
         all_subs = Submission.objects.filter(assignment=assignment).order_by(
             'student', '-final_score', '-ai_evaluation__total_score', '-id'
         )
 
-        # 在内存中去重（由于 order_by 的顺序，循环中每个学生遇到的第一条就是最高分）
+        # Deduplication in memory (because of the order_by order, the first thing each student encounters in the loop is the highest score)
         best_ids = []
         seen_students = set()
         for s in all_subs:
@@ -591,20 +610,20 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         submissions = Submission.objects.filter(id__in=best_ids).select_related('student')
 
         if not submissions.exists():
-            return Response({"error": "暂无提交记录"}, status=404)
+            return Response({"error": "No record of submission"}, status=404)
 
         byte_io = io.BytesIO()
         with zipfile.ZipFile(byte_io, 'w', zipfile.ZIP_DEFLATED) as zip_file:
             for sub in submissions:
                 if sub.file and os.path.exists(sub.file.path):
                     ext = os.path.splitext(sub.file.name)[1]
-                    # 在 ZIP 内展示分数信息
+                    # Display score information within the ZIP
                     score_val = sub.final_score if sub.final_score else "AI评"
                     arc_name = f"{sub.student.student_id_num}_{sub.student.first_name}_Attempt{sub.attempt_number}_Score{score_val}{ext}"
                     zip_file.write(sub.file.path, arcname=arc_name)
 
         byte_io.seek(0)
-        zip_filename = f"{assignment.title}_最高分作业合集.zip"
+        zip_filename = f"{assignment.title}_Highest score assignment collection.zip"
 
         response = HttpResponse(byte_io, content_type='application/zip')
         response['Content-Disposition'] = f"attachment; filename*=utf-8''{escape_uri_path(zip_filename)}"
@@ -612,9 +631,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'], url_path='submissions')
     def get_submissions(self, request, pk=None):
-        """
-        获取当前作业下所有学生的提交情况
-        """
+        """"""
         assignment = self.get_object()
         # 获取该作业的所有提交，并预加载学生信息和 AI 评价
         submissions = Submission.objects.filter(assignment=assignment) \
