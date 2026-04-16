@@ -91,53 +91,64 @@ class GradingPipeline:
 
     def run_stage_two_ai(self, docker_report, work_dir=None):
         """
-        第二阶段：调用 AI 引擎评分，并严格对齐 AIEvaluation 模型字段。
+        Phase 2: Perform AI semantic scoring, multi-dimensional data persistence, and global score alignment.
+
+        This method is the "brain" of the scoring pipeline, performing the following delicate operations under database transaction protection:
+
+        1. AI Semantic Analysis: AIScorer is called to convert the results (facts) of the sandbox run of the first stage into review data.
+        Shadow Storage:
+        - scores: Stores standard dimensions like Logic/Design/Style for back-end reports and charts.
+        - Detailed score (ai_raw_feedback) : Stores the fine-grained rating items defined by the teacher to ensure that the feedback is personalized and in-depth.
+        3. Data Alignment and patching: Explicitly fill in 'ai_raw_score' and 'ai_raw_feedback' to fix model field mismatch.
+        4. Score synchronization logic: use the database aggregation function (Max) to calculate the historical highest score of the student under the job in real time.
+        And update the associated Submission.final_score field.
+        5. Evidence chain retention: complete record of the original response of AI and the original output of sandbox, as the original evidence for subsequent manual review.
+        :param docker_report: The Docker operation report generated in the first stage.
+        :param work_dir: Source code decompression path for AI to read the code for static analysis.
         """
         with transaction.atomic():
-            # 1. 调用 AI 获取结构化评审数据
+            # 1. Call AI to get structured review data
             eval_data = self.scorer.evaluate_code(self.submission, docker_report, project_path=work_dir)
 
-            # 分数精度转换
+            # Fractional precision conversion
             try:
                 raw_val = eval_data.get('total_score', 0)
                 current_score = Decimal(str(raw_val))
             except Exception:
                 current_score = Decimal('0.00')
 
-            # 2. 影子存储逻辑：分离统计分与详细分
-            # stats_scores (Logic/Design/Style) 存入 scores 字段，对接数据分析图表
+            # 2. Shadow Storage Logic: Separating Statistical and detailed partitions
             stats_scores = eval_data.get('stats_scores', {"Logic": 0, "Design": 0, "Style": 0})
 
-            # 老师定义的详细维度分 (如 Parts 1-7) 存入 ai_raw_feedback 字段
+            # The detailed dimensions defined by the teacher (such as Parts 1-7) are stored in the ai_raw_feedback field
             detailed_scores_json = json.dumps(eval_data.get('scores', {}), ensure_ascii=False)
 
-            log_content = str(docker_report.stdout) if docker_report.stdout else "无运行日志"
+            log_content = str(docker_report.stdout) if docker_report.stdout else "No running logs"
 
-            # 3. 严格对齐模型字段持久化数据
+            # 3. Strictly align model fields to persist data
             AIEvaluation.objects.update_or_create(
                 submission=self.submission,
                 defaults={
-                    # 基础得分字段
+                    # Base score field
                     'total_score': current_score,
-                    'feedback': eval_data.get('feedback', "AI 评审未生成内容"),
+                    'feedback': eval_data.get('feedback', "The AI review did not generate content"),
 
-                    # 关键修复：显式填充模型中的原始评分字段
-                    'ai_raw_score': current_score,  # 存入 ai_raw_score
-                    'ai_raw_feedback': detailed_scores_json,  # 存入 ai_raw_feedback
+                    'ai_raw_score': current_score,
+                    'ai_raw_feedback': detailed_scores_json,
 
-                    # 结构化评分字段
-                    'scores': stats_scores,  # 存入维度得分 (用于统计)
+                    # Structured scoring fields
+                    'scores': stats_scores,
                     'kp_scores': eval_data.get('kp_scores', {}),
 
-                    # 证据备份
+                    # Backup of evidence
                     'raw_response': json.dumps(eval_data, ensure_ascii=False),
                     'raw_sandbox_output': f"EXIT_{docker_report.exit_code} | LOGS: {log_content}",
                     'is_published': True
                 }
             )
 
-            # 4. 全量成绩对齐（刷分逻辑）：确保 Submission 表中的 final_score 始终为历史最高分
-            print(f"正在同步历史最高分记录...")
+            # 4. Full score alignment (brushing logic) : Ensure that final_score in the Submission table is always the highest score in history
+            print(f"Syncing the all-time high score record...")
             aggregate_res = AIEvaluation.objects.filter(
                 submission__student=self.submission.student,
                 submission__assignment=self.submission.assignment
@@ -150,8 +161,8 @@ class GradingPipeline:
                 assignment=self.submission.assignment
             ).update(final_score=highest_score)
 
-            # 更新当前提交状态为完成
+            # Update the current commit status to complete
             self.submission.status = 'completed'
             self.submission.save(update_fields=['status'])
 
-            print(f"批改完成! 当前得分: {current_score}, 同步最高分: {highest_score}")
+            print(f"Correction done! Current score: {current_score}, Synchronous maximum score: {highest_score}")
