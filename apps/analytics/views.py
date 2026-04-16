@@ -9,15 +9,21 @@ from apps.core.models import Course, Assignment, Submission, AIEvaluation, Knowl
 
 class AnalyticsViewSet(viewsets.ViewSet):
     """
-    📊 深度学情分析中心：
-    - 学生端：穿透分析（严格匹配数据库 L1/L2）
-    - 教师端：班级洞察（全量汇总 L1/L2 + 智能精简）
+    Deep Learning Academic Analysis Center.
+    Provide differentiated data insights for both the teacher end and the student end:
+    - Teacher end (Course Dashboard): Comprehensive summary of class assignment performance, analysis of knowledge point mastery trends, and assistance in teaching decisions.
+    - Student end (Personal Analytics): In-depth analysis of individual weak points, comparison with the class average level.
+    Core features:
+    1. Robust data extraction: Supports bidirectional extraction of scores from structured fields and raw AI JSON responses.
+    2. Intelligent visualization optimization: Automatically performs "dichotomous simplification" when there are too many knowledge points, ensuring the readability of the radar chart.
+    3. Real-time aggregation: Utilizes Django aggregation functions (Avg, Count) to achieve millisecond-level data summarization.
     """
     permission_classes = [permissions.IsAuthenticated]
 
     def _extract_kp_scores(self, ev_obj):
         """
-        🚀 内部辅助方法：提取知识点分值（兼容字典及原始文本）
+        Internal support: Utilize multiple strategies to extract knowledge and scoring data.
+        Due to the volatility of the AI output, the scores may be stored in `scores.kp_scores`, or they may be hidden within the Markdown JSON block of `raw_response`. This method implements fault-tolerant parsing.
         """
         kp_data = ev_obj.scores.get('kp_scores', {}) if isinstance(ev_obj.scores, dict) else {}
 
@@ -32,20 +38,29 @@ class AnalyticsViewSet(viewsets.ViewSet):
                 pass
         return kp_data if isinstance(kp_data, dict) else {}
 
-    # --- 1. 教师端：班级洞察（全量汇总智能版） ---
     @action(detail=True, methods=['get'], url_path='course-dashboard')
     def course_dashboard(self, request, pk=None):
+        """
+        Teacher end: Class-wide academic performance statistics dashboard.
+        Business Logic:
+        1. Permission Check: Strictly verify whether the requester has the 'teacher' role.
+        2. Performance Evolution Trend (History): Statistically calculate the average class score of all previous assignments in this course, reflecting the fluctuations in teaching effectiveness.
+        3. Class Capability Radar (Radar): Summarize the knowledge point scores from all AI evaluations in the class (without hierarchical divisions),
+        constructing an overall skill map of the class.
+        4. Visual Noise Reduction (Smart Thinning): When there are too many knowledge point dimensions, automatically execute the "Two-Extremes Filtering Algorithm",
+        retaining only 4 dimensions with the highest and lowest scores each, helping teachers quickly identify "teaching achievements" and "weak links".
+        :param pk: Course ID
+        """
         if request.user.role != 'teacher':
-            return Response({"error": "权限不足"}, status=403)
+            return Response({"error": "Insufficient permissions"}, status=403)
 
         try:
             course = Course.objects.get(id=pk)
             assignments = Assignment.objects.filter(course=course).order_by('created_at')
 
-            # 作业趋势统计
+            # Statistics of Homework Trends
             trend = []
             for asm in assignments:
-                # 显式命名 'avg' 防止字段名匹配错误
                 res = Submission.objects.filter(
                     assignment=asm,
                     ai_evaluation__is_published=True
@@ -57,24 +72,22 @@ class AnalyticsViewSet(viewsets.ViewSet):
                     "score": round(float(avg_score), 1)
                 })
 
-            # 班级知识点汇总 (L1 + L2)
+            # Class Knowledge Summary (L1 + L2)
             kp_mastery = {}
             evals = AIEvaluation.objects.filter(submission__assignment__course=course, is_published=True)
 
             for ev in evals:
                 kp_data = self._extract_kp_scores(ev)
                 for kp_name, score in kp_data.items():
-                    # 🚀 教师端逻辑：全量汇总，去掉 L2 过滤
                     clean_name = kp_name.split('(')[0].strip()
                     kp_mastery.setdefault(clean_name, []).append(float(score))
 
-            # 计算平均分
+            # Calculate the average score
             raw_averages = {name: round(sum(scores) / len(scores), 1) for name, scores in kp_mastery.items()}
 
-            # 🚀 智能精简：如果全班维度 > 8 个，挑选最有代表性的展示，防止雷达图密恐
             if len(raw_averages) > 8:
                 sorted_items = sorted(raw_averages.items(), key=lambda x: x[1])
-                # 选取分数最低的 4 个和最高的 4 个
+                # Select the 4 with the lowest scores and the 4 with the highest scores
                 selected_data = dict(sorted_items[:4] + sorted_items[-4:])
                 processed_radar = selected_data
             else:
@@ -92,9 +105,19 @@ class AnalyticsViewSet(viewsets.ViewSet):
             traceback.print_exc()
             return Response({"error": str(e)}, status=500)
 
-    # --- 2. 学生端：个人分析（组长要求的严格匹配版） ---
     @action(detail=False, methods=['get'], url_path='student-profile')
     def student_profile(self, request):
+        """
+        Student end: Personal learning situation overview and growth records.
+        Business logic (following the strict classification standards defined by the team leader):
+        1. Vertical growth curve: Retrieve all published assessment records of this student and display the evolution process of their individual scores.
+        2. Penetrative classification radar:
+        - L1 General Skills (Radar L1): Only display core programming competencies (such as grammar, logic) that match the `is_system=True` entries in the database.
+        - L2 Special Skills (Radar L2): Display specific exam points that are not system-predefined and are tailored for specific assignments.
+        3. Strict matching verification: The knowledge point names output by AI must have corresponding records in the `KnowledgePoint` table to be included in the radar chart,
+        ensuring the authority and rigor of the student data.
+        :return: It includes the growth history, classification radar chart and summary of average scores.
+        """
         user = request.user
         evals = AIEvaluation.objects.filter(
             submission__student=user,
@@ -120,7 +143,6 @@ class AnalyticsViewSet(viewsets.ViewSet):
         for ev in evals:
             kp_data = self._extract_kp_scores(ev)
             for name, score in kp_data.items():
-                # 🚀 组长逻辑：必须在 KnowledgePoint 表中有记录才分类显示
                 kp_obj = KnowledgePoint.objects.filter(name=name).first()
                 if kp_obj:
                     target = l1_radar if kp_obj.is_system else l2_radar
@@ -135,3 +157,4 @@ class AnalyticsViewSet(viewsets.ViewSet):
                 "average_score": round(float(evals.aggregate(avg=Avg('total_score'))['avg'] or 0), 1)
             }
         })
+    
