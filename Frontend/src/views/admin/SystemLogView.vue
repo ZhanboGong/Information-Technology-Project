@@ -116,8 +116,7 @@ const getRowClass = ({ row }) => {
 };
 
 const viewDetails = (row) => {
-  // 这里可以扩展一个弹窗展示具体的 Request/Response Payload
-  ElMessage.info(`Log ID: ${row.id} - 详细原始报文需对接日志存储服务。`);
+  ElMessage.info(`Log ID: ${row.id} - The detailed original message needs to be stored in the log storage service.`);
 };
 
 onMounted(fetchLogs);

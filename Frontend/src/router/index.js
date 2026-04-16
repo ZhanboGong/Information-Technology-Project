@@ -2,7 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router';
 import { getToken, getUser } from '../utils/auth';
 
 const routes = [
-  // 1. 登录页
+  // 1. Login Page
   {
     path: '/login',
     name: 'Login',
@@ -10,7 +10,7 @@ const routes = [
     meta: { public: true }
   },
 
-  // 2. Admin 管理端 (独立 Layout)
+  // 2. Admin Side
   {
     path: '/admin',
     component: () => import('../layout/AdminLayout.vue'),
@@ -34,11 +34,11 @@ const routes = [
     ]
   },
 
-  // 3. 教师端 (使用 MainLayout)
+  // 3. Teacher Side
   {
     path: '/teacher',
     component: () => import('../layout/MainLayout.vue'),
-    meta: { roles: ['teacher', 'admin'] }, // 允许 admin 访问教师界面
+    meta: { roles: ['teacher', 'admin'] }, // Allow admin to access the teacher interface
     children: [
       { path: '', redirect: '/teacher/dashboard' },
       { path: 'dashboard', name: 'Dashboard', component: () => import('../views/teacher/DashboardView.vue') },
@@ -48,7 +48,7 @@ const routes = [
     ]
   },
 
-  // 4. 学生端 (补全了旧版本中缺失的作业、成绩、分析等路由)
+  // 4. Student Side
   {
     path: '/student',
     component: () => import('../layout/StudentLayout.vue'),
@@ -57,31 +57,26 @@ const routes = [
       { path: '', redirect: '/student/dashboard' },
       { path: 'dashboard', name: 'StudentDashboard', component: () => import('../views/student/StudentDashboardView.vue') },
       { path: 'assignments', name: 'StudentAssignments', component: () => import('../views/student/StudentAssignmentsView.vue') },
-      // 补全：课程作业列表
       {
         path: 'assignments/course/:courseId',
         name: 'StudentCourseAssignments',
         component: () => import('../views/student/StudentCourseAssignmentsView.vue')
       },
-      // 补全：提交作业
       {
         path: 'assignments/submit/:assignId',
         name: 'StudentSubmission',
         component: () => import('../views/student/StudentSubmissionView.vue')
       },
-      // 补全：成绩列表
       {
         path: 'grades',
         name: 'StudentGrades',
         component: () => import('../views/student/StudentGradesView.vue')
       },
-      // 补全：成绩详情
       {
         path: 'grades/detail/:id',
         name: 'StudentGradeDetail',
         component: () => import('../views/student/StudentGradeDetailView.vue')
       },
-      // 补全：学情分析
       {
         path: 'analysis',
         name: 'StudentAnalysis',
@@ -96,7 +91,7 @@ const routes = [
     ]
   },
 
-  // 5. 根路径 "/" 自动化分流
+  // 5. Root path "/" - Automated routing
   {
     path: '/',
     name: 'Root',
@@ -104,14 +99,14 @@ const routes = [
       const user = getUser();
       const token = getToken();
       if (!token || !user) return '/login';
-      // 根据角色跳转到对应后台
+      // Switch to the corresponding background based on the role.
       if (user.role === 'admin') return '/admin/dashboard';
       if (user.role === 'teacher') return '/teacher/dashboard';
       return '/student/dashboard';
     }
   },
 
-  // 6. 兜底 404
+  // 6. 404
   {
     path: '/:pathMatch(.*)*',
     redirect: '/login'
@@ -123,14 +118,13 @@ const router = createRouter({
   routes
 });
 
-// 核心路由守卫
 router.beforeEach((to, from, next) => {
   const token = getToken();
   const user = getUser();
   const isAuthenticated = !!token;
   const userRole = user?.role;
 
-  // A. 访问登录页：已登录则直接送走
+  // A. Access login page: If already logged in, simply proceed.
   if (to.path === '/login') {
     if (isAuthenticated) {
       if (userRole === 'admin') return next('/admin/dashboard');
@@ -140,15 +134,15 @@ router.beforeEach((to, from, next) => {
     return next();
   }
 
-  // B. 未登录拦截：非公开页面全部跳登录
+  // B. Login Required Block: All non-public pages redirect to the login page.
   if (!isAuthenticated && !to.meta.public) {
     return next({ name: 'Login' });
   }
 
-  // C. 权限验证
+  // C. Permission verification
   if (to.meta.roles && !to.meta.roles.includes(userRole)) {
     console.warn(`[Guard] 越权访问: ${userRole} -> ${to.path}`);
-    // 强制跳转回该角色应有的首页
+    // Force a redirection back to the appropriate homepage of this character.
     if (userRole === 'admin') return next('/admin/dashboard');
     if (userRole === 'teacher') return next('/teacher/dashboard');
     return next('/student/dashboard');

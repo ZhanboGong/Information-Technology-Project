@@ -75,7 +75,7 @@
           </div>
 
           <p class="text-xs text-gray-400 mb-8 leading-relaxed">
-            支持一键导入 Excel 或 CSV 文件。请确保文件包含：<b>username, id_num, name, role</b> 等字段。
+            Support one-click import of Excel or CSV files. Make sure the file is included: <b>username, id_num, name, role</b> etc.
           </p>
 
           <el-upload
@@ -94,16 +94,16 @@
           </el-upload>
 
           <div class="mt-auto pt-8">
-            <button 
+            <button
               @click="handleBulkImport"
               :disabled="!uploadFile || loading"
               class="w-full py-4 bg-slate-900 text-white font-black rounded-2xl shadow-xl hover:bg-black transition-all flex items-center justify-center gap-2 disabled:bg-gray-200"
             >
               <FileSpreadsheet size="18" /> Start Batch Processing
             </button>
-            
+
             <p class="text-[10px] text-center text-gray-400 mt-4">
-              * 批量导入的用户默认密码与其 ID 一致
+              * The default password for a bulk import user is the same as its ID
             </p>
           </div>
         </div>
@@ -121,7 +121,7 @@ import api from '../../utils/request';
 const loading = ref(false);
 const uploadFile = ref(null);
 
-// 单个注册表单
+// A single registration form
 const singleForm = reactive({
   username: '',
   student_id_num: '',
@@ -132,7 +132,7 @@ const singleForm = reactive({
 });
 
 /**
- * 处理单个注册
+ * Handle individual registration
  */
 const handleSingleRegister = async () => {
   if (!singleForm.username || !singleForm.student_id_num || !singleForm.first_name) {
@@ -142,11 +142,10 @@ const handleSingleRegister = async () => {
 
   loading.value = true;
   try {
-    // 调用的还是我们之前写的 admin/users 接口，后端 perform_create 会自动处理密码
     await api.post('/api/auth/admin/users/', singleForm);
     ElMessage.success(`User ${singleForm.username} created!`);
     
-    // 重置表单
+    // Reset the form
     Object.assign(singleForm, {
       username: '', student_id_num: '', first_name: '', class_name: '', role: 'student', email: ''
     });
@@ -160,14 +159,14 @@ const handleSingleRegister = async () => {
 };
 
 /**
- * 处理文件选择
+ * Selecting file processing
  */
 const handleFileChange = (file) => {
   uploadFile.value = file.raw;
 };
 
 /**
- * 执行批量导入 (需对应后端接口支持)
+ * Perform batch import
  */
 const handleBulkImport = async () => {
   if (!uploadFile.value) return;
@@ -177,8 +176,6 @@ const handleBulkImport = async () => {
 
   loading.value = true;
   try {
-    // 注意：这个接口需要你在后端 TeacherStudentManagementViewSet 中已经实现的逻辑
-    // 或者你可以专门为 Admin 写一个批量导入接口
     await api.post('/api/auth/teacher/students/import-students/', formData, {
       headers: { 'Content-Type': 'multipart/form-data' }
     });

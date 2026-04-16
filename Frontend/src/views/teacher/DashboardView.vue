@@ -156,7 +156,6 @@ const summaryStats = computed(() => {
       colorHex: '#805AD5', 
       progress: 100 
     },
-    // 🚀 这里换成了真实数据：累计批阅份数 (Total Submissions)
     { 
       label: 'Submissions', 
       value: data && data.summary ? data.summary.total_submissions : 0, 
@@ -186,7 +185,7 @@ const drawCharts = () => {
 
   const chartLabels = assignments.value.length > 0 
     ? assignments.value.map(a => a.title.length > 5 ? a.title.substring(0,5)+'..' : a.title) 
-    : ['暂无作业'];
+    : ['No assignment for now.'];
     
   const chartData = assignments.value.length > 0 
     ? assignments.value.map(() => Math.floor(Math.random() * 15 + 75)) // 模拟平均分
@@ -220,15 +219,13 @@ const drawCharts = () => {
         name: 'Average Score',
         data: chartData,
         type: 'bar',
-        // 🚨 核心改动：不再使用百分比，使用固定像素宽度，确保所有课程柱体粗细完全一致
         barWidth: 45, 
         showBackground: true,
         backgroundStyle: {
           color: 'rgba(243, 244, 246, 0.4)',
           borderRadius: [8, 8, 0, 0]
         },
-        itemStyle: { 
-          // 深蓝半透明毛玻璃效果
+        itemStyle: {
           color: 'rgba(30, 64, 175, 0.65)', 
           borderColor: 'rgba(255, 255, 255, 0.7)', 
           borderWidth: 1.5,
@@ -241,7 +238,7 @@ const drawCharts = () => {
         name: 'Trends',
         data: chartData,
         type: 'line',
-        smooth: false, // 硬朗直线
+        smooth: false,
         symbol: 'circle',
         symbolSize: 10,
         itemStyle: {

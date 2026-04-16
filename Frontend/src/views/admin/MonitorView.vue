@@ -162,7 +162,7 @@ const fetchMonitorData = async () => {
 
 onMounted(() => {
   fetchMonitorData();
-  // 每 30 秒自动刷新一次，确保持续监控
+  // It automatically refreshes every 30 seconds to ensure continuous monitoring.
   refreshTimer = setInterval(fetchMonitorData, 30000);
 });
 
@@ -177,7 +177,6 @@ onUnmounted(() => {
   backdrop-filter: blur(16px);
 }
 
-/* 简单的柱状图动画 */
 .transition-all {
   transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
 }

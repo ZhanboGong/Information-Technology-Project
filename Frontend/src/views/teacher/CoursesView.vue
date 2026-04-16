@@ -21,25 +21,43 @@
       
       <div v-else class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           <div v-for="course in courses" :key="course.id" class="frosted-card p-0 rounded-2xl overflow-hidden group hover:shadow-xl hover:-translate-y-1 transition-all border border-white/60 flex flex-col h-full cursor-pointer" @click="openCourseManagement(course)">
-              <div class="h-3 bg-gradient-to-r from-blue-400 to-indigo-500"></div>
-              <div class="p-6 flex-1 flex flex-col">
-                  <div class="flex justify-between items-start mb-3">
-                      <h3 class="text-xl font-bold text-gray-800 group-hover:text-blue-700 transition-colors">{{ course.name }}</h3>
-                      <span class="text-xs font-mono bg-blue-50 text-blue-600 px-2 py-1 rounded border border-blue-100 shrink-0 ml-2">ID:{{ course.id }}</span>
-                  </div>
-                  <p class="text-sm text-gray-500 line-clamp-2 leading-relaxed mb-6">{{ course.description || 'No course description available' }}</p>
-                  
-                  <div class="mt-auto">
-                    <div class="flex justify-between text-sm text-gray-600 font-medium bg-gray-50/50 p-3 rounded-xl border border-gray-100 mb-4">
-                        <span class="flex items-center gap-1.5"><Users size="16" class="text-blue-500"/> {{ course.student_count }} Enrolled</span>
-                        <span class="flex items-center gap-1.5"><Calendar size="16" class="text-gray-400"/> {{ formatDate(course.created_at) }}</span>
-                    </div>
-                    <button class="w-full py-2.5 bg-white border border-gray-200 text-gray-700 font-bold text-sm rounded-xl hover:bg-blue-50 hover:text-blue-700 hover:border-blue-200 transition shadow-sm flex justify-center items-center gap-2">
-                        <Settings2 size="16" /> Manage Course
-                    </button>
-                  </div>
-              </div>
-          </div>
+    <div class="h-3 bg-gradient-to-r from-blue-400 to-indigo-500"></div>
+    <div class="p-6 flex-1 flex flex-col">
+        <div class="flex justify-between items-start mb-3">
+            <div class="flex-1">
+                <h3 class="text-xl font-bold text-gray-800 group-hover:text-blue-700 transition-colors">{{ course.name }}</h3>
+
+                <div class="flex items-center gap-2 mt-1.5">
+                    <span class="text-[10px] font-black text-gray-400 uppercase tracking-widest">Invite Code:</span>
+                    <span
+                        class="text-[11px] font-mono font-black px-2 py-0.5 bg-indigo-50 text-indigo-600 rounded border border-indigo-100 hover:bg-indigo-600 hover:text-white transition-all shadow-sm flex items-center gap-1 group/code"
+                        title="Click to copy code"
+                        @click.stop="copyInviteCode(course.invite_code)"
+                    >
+                        {{ course.invite_code }}
+                        <Copy size="10" class="opacity-40 group-hover/code:opacity-100" />
+                    </span>
+                </div>
+            </div>
+
+            <div class="flex flex-col items-end gap-1">
+                <span class="text-xs font-mono bg-blue-50 text-blue-600 px-2 py-1 rounded border border-blue-100 shrink-0 ml-2">ID:{{ course.id }}</span>
+            </div>
+        </div>
+
+        <p class="text-sm text-gray-500 line-clamp-2 leading-relaxed mb-6">{{ course.description || 'No course description available' }}</p>
+
+        <div class="mt-auto">
+            <div class="flex justify-between text-sm text-gray-600 font-medium bg-gray-50/50 p-3 rounded-xl border border-gray-100 mb-4">
+                <span class="flex items-center gap-1.5"><Users size="16" class="text-blue-500"/> {{ course.student_count }} Enrolled</span>
+                <span class="flex items-center gap-1.5"><Calendar size="16" class="text-gray-400"/> {{ formatDate(course.created_at) }}</span>
+            </div>
+            <button class="w-full py-2.5 bg-white border border-gray-200 text-gray-700 font-bold text-sm rounded-xl hover:bg-blue-50 hover:text-blue-700 hover:border-blue-200 transition shadow-sm flex justify-center items-center gap-2">
+                <Settings2 size="16" /> Manage Course
+            </button>
+        </div>
+    </div>
+</div>
       </div>
     </template>
 
@@ -182,14 +200,14 @@
                   <div class="flex justify-between items-end mb-3">
                     <label class="block text-sm font-bold text-blue-800">Knowledge Points Configuration (L1/L2)</label>
                     <div class="flex gap-2">
-                        <button 
+                        <button
                           @click="showManualKPModal = true"
                           class="flex items-center gap-2 px-4 py-1.5 bg-emerald-50 text-emerald-600 rounded-lg text-xs font-black border border-emerald-100 hover:bg-emerald-600 hover:text-white transition-all shadow-sm"
                         >
                           <PlusCircle size="14" /> Add Manually
                         </button>
-                        <button 
-                          @click="getAIKPSuggestions" 
+                        <button
+                          @click="getAIKPSuggestions"
                           :disabled="isGeneratingKP"
                           class="flex items-center gap-2 px-4 py-1.5 bg-indigo-50 text-indigo-600 rounded-lg text-xs font-black hover:bg-indigo-600 hover:text-white transition-all disabled:opacity-50 shadow-sm"
                         >
@@ -294,7 +312,7 @@
             <p>No assignments published yet.</p>
         </div>
         <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div v-for="assign in courseAssignments" :key="assign.id" 
+          <div v-for="assign in courseAssignments" :key="assign.id"
                class="frosted-card p-6 rounded-2xl border border-white/60 hover:shadow-lg transition-all bg-white flex flex-col justify-between group">
             <div>
               <div class="flex justify-between items-start mb-2">
@@ -407,7 +425,7 @@
         <div class="bg-white rounded-3xl w-full max-w-lg p-8 shadow-2xl relative animate-fade-in">
             <button @click="showImportModal = false" class="absolute top-6 right-6 text-gray-400 hover:text-gray-600"><X size="24" /></button>
             <h3 class="text-xl font-bold mb-4 flex items-center gap-3"><FileSpreadsheet class="text-emerald-600" size="28" /> Student Import</h3>
-            
+
             <div class="bg-gray-50 p-4 rounded-2xl border border-gray-100 mb-6">
               <p class="text-xs text-gray-500 mb-3">Please use the standard template for batch enrollment:</p>
               <button @click="handleDownloadTemplate" class="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-xl text-xs font-bold text-gray-700 hover:bg-emerald-50 hover:text-emerald-600 hover:border-emerald-100 transition-all shadow-sm">
@@ -430,17 +448,16 @@
 </template>
 
 <script setup>
-import { ElMessage, ElMessageBox } from 'element-plus';
+import { ElMessage, ElMessageBox} from 'element-plus';
 import { ref, reactive, computed, onMounted } from 'vue';
 import api from '../../utils/request';
-import { 
-  Library, Users, Calendar, Settings2, ArrowLeft, UploadCloud, 
-  FilePlus, CheckSquare, Check, X, Loader2, Clock, Inbox, Search, 
+import {
+  Library, Users, Calendar, Settings2, ArrowLeft, UploadCloud,
+  FilePlus, CheckSquare, Check, X, Loader2, Clock, Inbox, Search,
   UserMinus, FileSpreadsheet, ClipboardCheck, Paperclip, Download,
-  Sparkles, Zap, Edit, ChevronRight, PlusCircle
+  Sparkles, Zap, Edit, ChevronRight, PlusCircle, Copy
 } from 'lucide-vue-next';
 
-// ------------------- 状态定义 -------------------
 const isLoading = ref(false);
 const courses = ref([]);
 const selectedCourse = ref(null);
@@ -448,16 +465,16 @@ const activeTab = ref('students');
 const courseStudents = ref([]);
 const isStudentsLoading = ref(false);
 const searchQuery = ref('');
-const selectedStudentIds = ref([]); 
+const selectedStudentIds = ref([]);
 const isAssignmentsLoading = ref(false);
 const courseAssignments = ref([]);
 
-// 🚀 新增：课程创建相关状态
+// Course creation-related status
 const showCreateCourseModal = ref(false);
 const isCourseCreating = ref(false);
 const courseCreateForm = reactive({ name: '', description: '' });
 
-// 核心作业模式控制
+// Core operation mode control
 const isEditMode = ref(false);
 const editingId = ref(null);
 
@@ -472,7 +489,7 @@ const isImporting = ref(false);
 const isGeneratingKP = ref(false);
 const aiSuggestions = ref([]);
 
-// 手动添加 KP 状态
+// Manually add KP status
 const showManualKPModal = ref(false);
 const isManualKPSaving = ref(false);
 const kpManualForm = reactive({ name: '', description: '' });
@@ -486,10 +503,10 @@ const gradeLevels = ["High Distinction (85-100%)", "Distinction (75-84%)", "Cred
 
 const form = reactive({
   title: '',
-  content: '', 
-  course: '', 
+  content: '',
+  course: '',
   deadline: '',
-  knowledge_points: [], // 存储 ID 数组
+  knowledge_points: [],
   rubric_config: {
     items: [
       {
@@ -502,10 +519,24 @@ const form = reactive({
   },
   max_attempts: 3,
   category: 'python',
-  attachment: null 
+  attachment: null
 });
 
-// ------------------- 计算属性 -------------------
+const copyInviteCode = (code) => {
+  if (!code) return;
+
+  navigator.clipboard.writeText(code).then(() => {
+    ElMessage({
+      message: 'Invite code copied to clipboard!',
+      type: 'success',
+      plain: true,
+      duration: 2000
+    });
+  }).catch(() => {
+    ElMessage.error('Failed to copy code');
+  });
+};
+
 const rubricTotal = computed(() => {
   if (!form.rubric_config.items) return 0;
   return form.rubric_config.items.reduce((sum, item) => sum + (item.weight || 0), 0);
@@ -513,17 +544,16 @@ const rubricTotal = computed(() => {
 
 const filteredStudents = computed(() => {
   if (!searchQuery.value) return courseStudents.value;
-  return courseStudents.value.filter(s => 
-    (s.name || s.username || '').toLowerCase().includes(searchQuery.value.toLowerCase()) || 
+  return courseStudents.value.filter(s =>
+    (s.name || s.username || '').toLowerCase().includes(searchQuery.value.toLowerCase()) ||
     (s.student_id_num || '').includes(searchQuery.value)
   );
 });
 
 const isAllSelected = computed(() => filteredStudents.value.length > 0 && selectedStudentIds.value.length === filteredStudents.value.length);
 
-// ------------------- 业务逻辑 -------------------
 
-// 🚀 新增功能：处理课程创建
+// Handling course creation
 const handleCreateCourse = async () => {
     if (!courseCreateForm.name) return ElMessage.warning('Course Title is mandatory');
     isCourseCreating.value = true;
@@ -535,15 +565,15 @@ const handleCreateCourse = async () => {
         ElMessage.success('Course established successfully!');
         showCreateCourseModal.value = false;
         courseCreateForm.name = ''; courseCreateForm.description = '';
-        fetchCourses(); // 刷新外层列表
-    } catch (e) { 
+        fetchCourses();
+    } catch (e) {
         ElMessage.error('Establishment failed');
-    } finally { 
-        isCourseCreating.value = false; 
+    } finally {
+        isCourseCreating.value = false;
     }
 };
 
-// 🚀 新增功能：下载导入模板逻辑
+// Download and import template logic
 const handleDownloadTemplate = async () => {
   try {
     const response = await api.get('/api/auth/teacher/students/download-template/', { responseType: 'blob' });
@@ -559,14 +589,16 @@ const handleDownloadTemplate = async () => {
   }
 };
 
-// 🚀 修改作业逻辑：填充数据并进入编辑模式
+
+
+// Fill in the data and enter the editing mode
 const handleEditAssignment = (assign) => {
   isEditMode.value = true;
   editingId.value = assign.id;
   activeTab.value = 'publish_assignment';
   currentStep.value = 1;
   
-  // 回显基础数据
+  // Echoing basic data
   form.title = assign.title;
   form.content = assign.content;
   form.deadline = assign.deadline;
@@ -574,31 +606,31 @@ const handleEditAssignment = (assign) => {
   form.max_attempts = assign.max_attempts;
   form.course = assign.course.id || assign.course;
   
-  // 处理知识点 ID 列表转换 (确保只提取 ID)
+  // Process the list of knowledge point IDs (make sure to extract only the IDs)
   if (assign.knowledge_points) {
       form.knowledge_points = assign.knowledge_points.map(kp => typeof kp === 'object' ? kp.id : kp);
   } else {
       form.knowledge_points = [];
   }
   
-  // 回显标准矩阵
+  // Echo standard matrix
   if (assign.rubric_config) {
       form.rubric_config = JSON.parse(JSON.stringify(assign.rubric_config));
   }
   
-  // 附件展示重置
+  // The attachment shows the reset operation.
   fileList.value = assign.attachment ? [{ name: assign.attachment_name || 'Current Attachment', url: assign.attachment }] : [];
-  // 重置表单中的 attachment 对象，除非用户上传新文件
+  // Reset the attachment object in the form, unless the user uploads a new file
   form.attachment = null;
 };
 
-// 🚀 创建模式重置
+// Create mode reset
 const enterCreateMode = () => {
     isEditMode.value = false;
     editingId.value = null;
     activeTab.value = 'publish_assignment';
     currentStep.value = 1;
-    // 重置表单
+    // Reset the form
     Object.assign(form, {
         title: '', content: '', deadline: '', knowledge_points: [], attachment: null,
         rubric_config: { items: [{ criterion: "Algorithm & Logic", weight: 100, description: "", detailed_rubric: {} }] }
@@ -606,7 +638,7 @@ const enterCreateMode = () => {
     fileList.value = [];
 };
 
-// 🚀 手动添加 KP
+// Manually add KP
 const handleManualCreateKP = async () => {
     if (!kpManualForm.name || !kpManualForm.description) return ElMessage.warning('Incomplete form');
     isManualKPSaving.value = true;
@@ -668,8 +700,7 @@ const handleFinalPublish = async () => {
     formData.append('rubric_config', JSON.stringify(finalRubric));
     formData.append('reference_logic', JSON.stringify(finalRubric));
     formData.append('knowledge_points', JSON.stringify(form.knowledge_points));
-    
-    // 关键修复点：只有当 attachment 为新 File 对象时才 append，解决后端深拷贝报错问题
+
     if (form.attachment instanceof File) {
       formData.append('attachment', form.attachment);
     }
@@ -685,7 +716,6 @@ const handleFinalPublish = async () => {
   finally { isSubmitting.value = false; }
 };
 
-// ------------------- 基础支撑函数 (全量保留) -------------------
 const handleFileChange = (file) => { form.attachment = file.raw; };
 const handleFileRemove = () => { form.attachment = null; };
 const jumpToStep = (step) => { if (step <= currentStep.value || isEditMode.value) currentStep.value = step; };
@@ -749,7 +779,6 @@ const handleImportStudents = async (e) => {
   formData.append('course_id', selectedCourse.value.id);
   try {
     const res = await api.post('/api/auth/teacher/students/import-students/', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
-    // 🚀 优化提示：显示后端返回的详细导入成功信息
     ElMessageBox.alert(res.message || 'Import Success', 'Result', { confirmButtonText: 'OK', type: 'success' });
     showImportModal.value = false;
     fetchCourseStudents(selectedCourse.value.id);

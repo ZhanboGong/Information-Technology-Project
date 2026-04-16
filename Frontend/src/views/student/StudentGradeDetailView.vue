@@ -178,10 +178,10 @@ const parsedRawFeedback = computed(() => {
 
 const renderMarkdown = (content) => content ? md.render(content) : '';
 
-// 🚀 获取所有维度的得分（用于 Tooltip）
+// Obtain the scores for all dimensions (for use in Tooltips)
 const allScores = computed(() => evaluation.value ? { ...(evaluation.value.scores || {}), ...(evaluation.value.kp_scores || {}) } : {});
 
-// 🚀 雷达图视觉显示限制：只取前 8 个
+// Radar chart visual display limitation: Only the top 8 are displayed.
 const radarDisplayScores = computed(() => {
   const entries = Object.entries(allScores.value);
   return Object.fromEntries(entries.slice(0, 8));
@@ -190,7 +190,7 @@ const radarDisplayScores = computed(() => {
 const goBack = () => router.push('/student/grades');
 
 /**
- * 🚀 PDF 优化下载功能：解决灰色、模糊、滤镜丢失问题
+ * PDF Optimization Download Function
  */
 const downloadPDF = async () => {
   if (isDownloading.value || !assignment.value) return;
@@ -204,18 +204,17 @@ const downloadPDF = async () => {
 
   try {
     const element = reportContent.value;
-    element.classList.add('pdf-rendering'); // 添加渲染标记类
+    element.classList.add('pdf-rendering');
 
     const canvas = await html2canvas(element, {
-      scale: 3,             // 极高清晰度
+      scale: 3,
       useCORS: true,        
-      backgroundColor: '#ffffff', // 强制纯白背景
+      backgroundColor: '#ffffff',
       logging: false,
       onclone: (clonedDoc) => {
         const clonedEl = clonedDoc.querySelector('.pdf-rendering');
         if (clonedEl) {
           clonedEl.style.background = '#ffffff';
-          // 🚀 补丁：导出时移除所有透明度和毛玻璃效果，防止变灰
           const cards = clonedEl.querySelectorAll('.frosted-card, .bg-white\\/80, .bg-white\\/60');
           cards.forEach(c => {
             c.style.backdropFilter = 'none';
@@ -289,7 +288,6 @@ const drawRadarChart = () => {
       shadowBlur: 10,
       shadowColor: 'rgba(0,0,0,0.1)',
       textStyle: { color: '#1e293b', fontSize: 12 },
-      // 🚀 核心：Tooltip 展示全量数据
       formatter: () => {
         let res = `<div style="font-weight:900; color:#1e3a8a; border-bottom:1px solid #eee; margin-bottom:8px; padding-bottom:4px;">Complete Skill Analysis</div>`;
         fullDataEntries.forEach(([key, val]) => {
@@ -349,12 +347,10 @@ onMounted(initData);
 .custom-scrollbar::-webkit-scrollbar { width: 6px; }
 .custom-scrollbar::-webkit-scrollbar-thumb { background: #475569; border-radius: 10px; }
 
-/* PDF 渲染专用补丁，强制深色文字以确保清晰 */
 .pdf-rendering { color: #000 !important; }
 .pdf-rendering :deep(.text-gray-500) { color: #334155 !important; }
 .pdf-rendering :deep(.text-gray-400) { color: #475569 !important; }
 
-/* Markdown 样式保持专业 */
 .markdown-body :deep(h1), .markdown-body :deep(h2), .markdown-body :deep(h3) {
   color: #1e3a8a; margin-top: 1.5rem; margin-bottom: 0.75rem; font-weight: 800;
 }

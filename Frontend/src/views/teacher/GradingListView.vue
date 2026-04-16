@@ -151,11 +151,10 @@ import {
   Bot, CheckCircle2, Download, FileDown, ClipboardCheck, MessageSquare 
 } from 'lucide-vue-next';
 
-// Markdown 配置
+// Markdown configuration
 const md = new MarkdownIt({ html: true, linkify: true, typographer: true });
 const renderMarkdown = (content) => content ? md.render(content) : '';
 
-// 基础状态
 const isLoading = ref(false);
 const courses = ref([]);
 const selectedCourse = ref(null);
@@ -178,7 +177,7 @@ const formatDate = (dateStr) => {
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
 };
 
-// 自动计算总分 (基于权重)
+// Automatically calculate the total score (based on weights)
 const calculatedTotalScore = computed(() => {
   if (!gradingRubric.value.length) return 0;
   let total = 0;
@@ -194,7 +193,7 @@ onMounted(async () => {
   try {
     const res = await api.get('/api/auth/teacher/courses/');
     courses.value = res.results || res;
-  } catch (e) { ElMessage.error('课程列表加载失败'); }
+  } catch (e) { ElMessage.error('Course list loading failed'); }
   finally { isLoading.value = false; }
 });
 
@@ -206,7 +205,7 @@ const openCourse = async (course) => {
     const res = await api.get('/api/auth/teacher/assignments/');
     const all = res.results || res;
     courseAssignments.value = all.filter(a => (typeof a.course === 'object' ? a.course.id : a.course) === course.id);
-  } catch(e) { ElMessage.error('作业列表加载失败'); }
+  } catch(e) { ElMessage.error('The list of assignments failed to load.'); }
   finally { isAssignmentsLoading.value = false; }
 };
 
@@ -236,23 +235,21 @@ const openWorkspace = async (assign) => {
     });
 
     if(wsStudents.value.length > 0) selectStudent(wsStudents.value[0]);
-  } catch (e) { ElMessage.error('阅卷台初始化失败'); }
+  } catch (e) { ElMessage.error('The marking station initialization failed.'); }
   finally { isWorkspaceLoading.value = false; }
 };
 
-// 【核心逻辑：彻底同步最高分的数据和标准】
 const selectStudent = (s) => { 
   currentStudent.value = s; 
   const bestEval = s.best_submission?.ai_evaluation;
   
-  // 1. 同步 Rubric 维度 (优先使用该次评分时的标准快照)
+  // 1. Synchronous Rubric Dimensions
   const rubricSource = bestEval?.rubric_snap || selectedAssignment.value?.rubric_config;
   if (rubricSource?.items) {
-    // 必须深拷贝，防止切换学生时状态互相污染
     gradingRubric.value = JSON.parse(JSON.stringify(rubricSource.items));
   }
 
-  // 2. 深度提取维度分 (从 ai_raw_feedback 解析)
+  // 2. Deeply extract dimensionality features (parsed from ai_raw_feedback)
   let existingKpScores = bestEval?.kp_scores || {};
   
   if (bestEval?.ai_raw_feedback && typeof bestEval.ai_raw_feedback === 'string') {
@@ -262,10 +259,10 @@ const selectStudent = (s) => {
     } catch (e) { console.warn("Failed to parse raw feedback JSON"); }
   }
   
-  // 3. 强制重构 rubricScores 对象以触发 UI 刷新
+  // 3. Force the reconfiguration of the rubricScores object to trigger the UI refresh
   const freshScores = {};
   gradingRubric.value.forEach(item => {
-    // 逻辑：如果最高分记录里有详细维度分则取，否则默认为该次总分
+    // Logic: If there are detailed dimension scores in the highest score record, then use them; otherwise, the total score of this occasion will be the default value.
     freshScores[item.criterion] = existingKpScores[item.criterion] ?? (bestEval?.total_score || 0);
   });
   rubricScores.value = freshScores;
@@ -285,14 +282,14 @@ const downloadSingle = async () => {
     const url = window.URL.createObjectURL(new Blob([response.data || response]));
     const link = document.createElement('a');
     link.href = url;
-    // 命名格式：学号_姓名_Atmt尝试次数.zip
+    // Naming format: Student ID_Name_Atmt_attempt_count.zip
     const fileName = `${student.student_id_num}_${student.student_name}_Atmt${sub.attempt_number}.zip`;
     link.setAttribute('download', fileName);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
     window.URL.revokeObjectURL(url);
-  } catch (e) { ElMessage.error('文件获取失败'); }
+  } catch (e) { ElMessage.error('File retrieval failed'); }
 };
 
 const downloadAllSubmissions = async () => {
@@ -308,7 +305,7 @@ const downloadAllSubmissions = async () => {
     link.click();
     document.body.removeChild(link);
     window.URL.revokeObjectURL(url);
-  } catch (e) { ElMessage.error('打包下载失败'); }
+  } catch (e) { ElMessage.error('Packaging and downloading failed'); }
   finally { isDownloadingAll.value = false; }
 };
 
@@ -320,11 +317,11 @@ const publishGrade = async () => {
       submission_id: currentStudent.value.best_submission.id, 
       score: calculatedTotalScore.value,
       feedback: teacherRemarks.value,
-      kp_scores: rubricScores.value // 提交详细的维度得分
+      kp_scores: rubricScores.value
     });
-    ElMessage.success('详细评分已保存并发布');
+    ElMessage.success('Detailed ratings have been saved and published.');
     currentStudent.value.final_score = calculatedTotalScore.value;
-  } catch (e) { ElMessage.error('评分发布失败'); }
+  } catch (e) { ElMessage.error('Rating release failed'); }
   finally { isPublishing.value = false; }
 };
 </script>
@@ -334,7 +331,6 @@ const publishGrade = async () => {
 .animate-fade-in { animation: fadeIn 0.4s ease-out; }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 
-/* Markdown 样式 */
 :deep(.markdown-body) h1 { @apply text-xl font-bold mb-4 border-b pb-2; }
 :deep(.markdown-body) h2 { @apply text-lg font-bold mt-4 mb-2; }
 :deep(.markdown-body) p { @apply mb-3 leading-6; }

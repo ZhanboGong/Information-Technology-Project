@@ -169,7 +169,7 @@ const userList = ref([]);
 const loading = ref(false);
 const submitting = ref(false);
 
-// 弹窗状态管理
+// Popup window status management
 const showDialog = ref(false);
 const isEdit = ref(false);
 const currentUserId = ref(null);
@@ -257,7 +257,7 @@ const handleToggleStatus = async (user, val) => {
     await api.patch(`/api/auth/admin/users/${user.id}/`, { is_active: val });
     ElMessage.success(`User ${user.username} is now ${val ? 'Active' : 'Disabled'}`);
   } catch (error) {
-    user.is_active = !val; // 失败回滚
+    user.is_active = !val; // Failure rollback
     ElMessage.error('Failed to change user status');
   }
 };
@@ -294,7 +294,6 @@ onMounted(fetchUsers);
 </script>
 
 <style scoped>
-/* 表格行美化 */
 .admin-table :deep(.el-table__row) {
   transition: all 0.2s;
 }
@@ -314,7 +313,6 @@ onMounted(fetchUsers);
   border: 1px solid rgba(226, 232, 240, 0.8);
 }
 
-/* 磨砂效果弹窗 */
 :deep(.custom-dialog) {
   border-radius: 32px;
   overflow: hidden;

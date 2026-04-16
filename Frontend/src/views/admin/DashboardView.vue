@@ -55,7 +55,6 @@
 
 <script setup>
 import { ref, onMounted, nextTick } from 'vue';
-// 【关键修改】引用你项目自定义的请求工具
 import api from '../../utils/request'; 
 import * as echarts from 'echarts';
 import { Users, BookOpen, CheckCircle, AlertTriangle, Activity, FileText } from 'lucide-vue-next';
@@ -116,10 +115,8 @@ const initChart = (data) => {
 const fetchData = async () => {
   loading.value = true;
   try {
-    // 使用 api 替代原生 axios，它会自动处理 Token
     const res = await api.get('/api/auth/admin/dashboard-stats/');
-    
-    // 兼容处理：有些封装会直接返回 data，有些会返回整个 response
+
     const data = res.data || res;
     
     stats.value = data.stats;

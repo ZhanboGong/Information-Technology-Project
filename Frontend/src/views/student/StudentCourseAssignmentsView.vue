@@ -222,14 +222,14 @@ const handleShowDetail = (assign) => {
 };
 
 /**
- * 🚀 整合新增：下载附件处理函数
+ * Download the attached processing function
  */
 const handleDownload = (fileUrl, fileName) => {
   if (!fileUrl) return;
   try {
     const link = document.createElement('a');
     link.href = fileUrl;
-    // 设置下载文件名，若后端没给 attachment_name 则用默认
+    // Set the name of the downloaded file
     link.setAttribute('download', fileName || 'Assignment_Resource');
     document.body.appendChild(link);
     link.click();
@@ -241,7 +241,7 @@ const handleDownload = (fileUrl, fileName) => {
 };
 
 /**
- * 矩阵行数据处理逻辑
+ * Matrix row data processing logic
  */
 const matrixData = computed(() => {
   const config = selectedAssignment.value?.rubric_config;

@@ -2,22 +2,29 @@
   <div class="min-h-screen flex font-sans bg-[#F0F4F8]">
     <nav class="w-64 sidebar-frosted flex flex-col py-8 z-50 fixed h-full overflow-y-auto custom-scrollbar">
       <div class="px-8 mb-8 flex items-center gap-4 shrink-0">
-        <div class="relative group">
-          <svg width="48" height="48" class="relative h-12 w-12 rounded-lg bg-white shadow-lg p-1" viewBox="0 0 100 120">
-              <defs>
-                  <linearGradient id="scuYellow" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#FFC72C"/><stop offset="100%" stop-color="#EAAA00"/></linearGradient>
-                  <linearGradient id="scuTeal" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#00939D"/><stop offset="100%" stop-color="#00555A"/></linearGradient>
-              </defs>
-              <path d="M50 115 C50 115 90 95 90 30 V 10 L 50 0 L 10 10 V 30 C 10 95 50 115 50 115 Z" fill="white"/>
-              <path d="M50 55 L 50 5 L 15 15 C 15 35 25 50 50 55 Z" fill="url(#scuYellow)"/>
-              <path d="M50 55 L 50 5 L 85 15 C 85 35 75 50 50 55 Z" fill="url(#scuTeal)"/>
-              <path d="M50 65 L 50 110 C 25 100 15 80 15 40 C 15 60 25 65 50 65 Z" fill="url(#scuYellow)"/>
-              <path d="M50 65 L 50 110 C 75 100 85 80 85 40 C 85 60 75 65 50 65 Z" fill="url(#scuTeal)"/>
-          </svg>
-        </div>
+        <div class="py-8 flex justify-center">
+  <svg width="60" height="60" class="rounded-2xl bg-white/20 p-2.5 backdrop-blur-md" viewBox="0 0 120 120">
+    <path
+      d="M36 24 C31 24 26 29 26 34 V 49 C 26 54 21 54 21 54 C 21 54 26 54 26 59 V 74 C 26 79 31 84 36 84 M84 24 C89 24 94 29 94 34 V 49 C 94 54 99 54 99 54 C 99 54 94 54 94 59 V 74 C 94 79 89 84 84 84 Z"
+      fill="white"
+      opacity="0.15"
+      class="group-hover:opacity-20 transition-opacity"
+    />
+
+    <path
+      d="M36 24 C31 24 26 29 26 34 V 49 C 26 54 21 54 21 54 C 21 54 26 54 26 59 V 74 C 26 79 31 84 36 84 M84 24 C89 24 94 29 94 34 V 49 C 94 54 99 54 99 54 C 99 54 94 54 94 59 V 74 C 94 79 89 84 84 84 M68 18 L52 90"
+      fill="none"
+      stroke="white"
+      stroke-width="7"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      class="group-hover:stroke-[white] transition-colors"
+    />
+  </svg>
+</div>
         <div>
-            <h1 class="text-lg font-bold tracking-tight text-white">Southern Cross</h1>
-            <p class="text-xs text-blue-200 font-medium tracking-wide uppercase">University</p>
+            <h1 class="text-lg font-bold tracking-tight text-white">Intelligent Programming Education</h1>
+            <p class="text-xs text-blue-200 font-medium tracking-wide uppercase">System</p>
         </div>
       </div>
       
@@ -183,13 +190,13 @@ const authStore = useAuthStore();
 const showNotifications = ref(false);
 const reminders = ref([]);
 
-// 获取提醒数据
+// Getting alert data
 const fetchReminders = async () => {
   try {
     const token = authStore.token;
     if (!token) return;
 
-    // 假设后端复用此接口，但在老师角色下返回：作业标题、已交人数、总人数、截止时间
+    // Suppose the backend reuses this interface, but returns under the teacher role: assignment title, number of people turned in, total number of people, deadline
     const response = await axios.get('/api/auth/home/reminders/', {
       headers: {
         'Accept': 'application/json',
@@ -218,7 +225,7 @@ const closeNotifications = (e) => {
 
 const goToGrading = (id) => {
   showNotifications.value = false;
-  // 跳转到该作业的批改页面，或者批改列表并高亮该项
+  // Go to the grading page for that assignment, or to the grading list and highlight that item
   router.push('/teacher/grading');
 };
 

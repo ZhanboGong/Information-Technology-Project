@@ -172,7 +172,7 @@ import {
 
 const authStore = useAuthStore();
 
-// 🚀 使用计算属性实时同步 Store 中的用户信息
+// Use computed properties to synchronously update the user information in the Store in real time.
 const user = computed(() => authStore.user);
 
 const infoSubmitting = ref(false);
@@ -182,24 +182,21 @@ const pwdSubmitting = ref(false);
 const pwdForm = ref({ old_password: '', new_password: '', confirm_password: '' });
 
 /**
- * 🚀 核心修改：页面挂载时请求后端接口拉取最新完整信息
- * 解决登录时持久化存储（localStorage）中数据字段缺失的问题
+ * When the page is loaded, it requests the backend interface to retrieve the latest complete information.
  */
 const fetchLatestProfile = async () => {
   try {
-    // 接口路径对齐 urls.py 中的 router.register(r'profile', UserProfileViewSet)
     const res = await api.get('/api/auth/profile/me/');
     const latestUserData = res.data || res;
-    
-    // 更新全局 Store，这将触发上面的 computed(user) 重新计算
+
     authStore.setUser(latestUserData);
     
-    // 初始化表单显示
+    // Initialize the form display
     infoForm.value.first_name = latestUserData.first_name || '';
     infoForm.value.last_name = latestUserData.last_name || '';
   } catch (error) {
     console.error('Failed to load latest profile:', error);
-    // 如果拉取失败，回退到 store 中的基础数据
+    // If the pull operation fails, revert to the basic data stored in the store.
     if (user.value) {
       infoForm.value.first_name = user.value.first_name || '';
       infoForm.value.last_name = user.value.last_name || '';
@@ -218,14 +215,13 @@ const handleUpdateInfo = async () => {
 
   infoSubmitting.value = true;
   try {
-    // 调用 UserProfileViewSet 的 manage_me (patch)
     const res = await api.patch('/api/auth/profile/me/', {
       first_name: infoForm.value.first_name,
       last_name: infoForm.value.last_name
     });
     ElMessage.success('Information updated successfully');
     
-    // 更新 Store 里的数据
+    // Update the data in the Store
     authStore.setUser(res.data || res); 
   } catch (error) {
     console.error('Update failed:', error);
@@ -245,17 +241,16 @@ const handleChangePassword = async () => {
 
   pwdSubmitting.value = true;
   try {
-    // 调用 UserProfileViewSet 的 change_password
+    // Call the change_password method of the UserProfileViewSet
     await api.post('/api/auth/profile/change-password/', {
       old_password: pwdForm.value.old_password,
       new_password: pwdForm.value.new_password
     });
     ElMessage.success('Password changed successfully');
-    // 重置表单
+    // Reset the form
     pwdForm.value = { old_password: '', new_password: '', confirm_password: '' };
   } catch (error) {
     console.error('Change password failed:', error);
-    // 后端如果返回具体错误（如旧密码错误）会由 request.js 拦截或在此处理
   } finally {
     pwdSubmitting.value = false;
   }

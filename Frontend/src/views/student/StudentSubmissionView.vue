@@ -145,9 +145,7 @@ const isDragging = ref(false);
 const selectedFile = ref(null);
 const fileInput = ref(null);
 
-// 修改点：定义跳转函数
 const goToDetail = (record) => {
-  // 根据你的路由配置跳转到成绩详情页
   if (record && record.id){
     router.push(`/student/grades/detail/${record.id}`);
   }else{

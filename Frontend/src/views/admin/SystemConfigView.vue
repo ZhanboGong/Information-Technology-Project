@@ -40,7 +40,7 @@
           <div class="p-4 bg-amber-50/50 border border-amber-100 rounded-2xl flex gap-3 items-start">
             <AlertCircle class="text-amber-500 shrink-0 mt-0.5" size="18" />
             <p class="text-xs text-amber-700 leading-relaxed">
-              <b>Important:</b> 修改此处的配置将立即影响全系统的 AI 评分功能。请确保 API 余额充足且 Key 具备相应模型的访问权限。
+              <b>Important:</b> Changing the configuration here will immediately impact the system-wide AI scoring functionality. Make sure the API balance is sufficient and the Key has access to the appropriate model.
             </p>
           </div>
         </div>
@@ -65,13 +65,12 @@
 import { reactive, ref, onMounted } from 'vue';
 import { Cpu, Bot, Save, AlertCircle, Loader2 } from 'lucide-vue-next';
 import { ElMessage } from 'element-plus';
-import api from '../../utils/request'; // 引入项目封装的请求工具
+import api from '../../utils/request';
 
 const saving = ref(false);
 const loading = ref(false);
 const testing = ref(false);
 
-// 注意：这里的 key 名要和后端 Serializer 保持一致
 const config = reactive({
   deepseek_api_key: '',
   deepseek_base_url: '',
@@ -79,7 +78,7 @@ const config = reactive({
 });
 
 /**
- * 初始化：从后端获取当前配置
+ * Initialization: Retrieve the current configuration from the backend.
  */
 const fetchConfig = async () => {
   loading.value = true;
@@ -90,14 +89,14 @@ const fetchConfig = async () => {
     Object.assign(config, data);
   } catch (err) {
     console.error(err);
-    ElMessage.error('无法加载系统配置，请检查管理员权限');
+    ElMessage.error('The system configuration cannot be loaded. Please check your administrator privileges.');
   } finally {
     loading.value = false;
   }
 };
 
 /**
- * 保存修改
+ * Save modifications
  */
 const handleSave = async () => {
   saving.value = true;
@@ -106,15 +105,14 @@ const handleSave = async () => {
     ElMessage.success('Configuration updated successfully');
   } catch (err) {
     console.error(err);
-    ElMessage.error('保存失败，请检查网络或后端日志');
+    ElMessage.error('Save operation failed. Please check the network or the backend logs.');
   } finally {
     saving.value = false;
   }
 };
 
 /**
- * 测试连接逻辑
- * 这里可以调用后端一个简单的测试接口，或者前端直接尝试访问一次 DeepSeek 的 models 列表
+ * Testing connection logic
  */
 const testConnection = async () => {
   if (!config.deepseek_api_key) {
@@ -126,8 +124,6 @@ const testConnection = async () => {
   ElMessage.info('Verifying DeepSeek API connectivity...');
   
   try {
-    // 模拟一个请求或调用后端真实的连接测试接口
-    // 这里建议后端增加一个 test-connection 的 action
     setTimeout(() => {
       testing.value = false;
       ElMessage.success('Connection test passed! API is responsive.');

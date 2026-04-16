@@ -143,17 +143,16 @@ const fetchAnalysisData = async () => {
   }
 };
 
-// 1. 合并全量数据集 (用于 Tooltip 展示)
+// 1. Merge the complete data set
 const combinedMap = computed(() => ({ ...radarL1.value, ...radarL2.value }));
 
-// 2. 🚀 核心修改：雷达图视觉显示数据集 (仅限 Top 8)
+// 2. The radar chart visually presents the data set (limited to the top 8)
 const radarDisplayMap = computed(() => {
   const entries = Object.entries(combinedMap.value);
-  // 这里可以根据得分排序显示前8个，也可以按默认顺序
   return Object.fromEntries(entries.slice(0, 8));
 });
 
-// 3. 修正：Weakest KP (取最小值)
+// 3. The weakest KP (taking the minimum value)
 const weakestKp = computed(() => {
   const entries = Object.entries(combinedMap.value);
   if (entries.length === 0) return null;
@@ -161,7 +160,7 @@ const weakestKp = computed(() => {
   return { name: sorted[0][0], score: Math.round(sorted[0][1]) };
 });
 
-// 4. 修正：Best KP (取最大值)
+// 4. Best KP (maximum value)
 const bestKp = computed(() => {
   const entries = Object.entries(combinedMap.value);
   if (entries.length === 0) return null;
@@ -183,7 +182,6 @@ const initRadarChart = () => {
   const displayValues = displayKeys.map(key => radarDisplayMap.value[key] || 0);
 
   const option = {
-    // 🚀 核心修改：Tooltip 全量展示逻辑
     tooltip: { 
       trigger: 'item',
       backgroundColor: 'rgba(255, 255, 255, 0.98)',

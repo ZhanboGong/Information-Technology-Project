@@ -2,22 +2,29 @@
   <div class="min-h-screen flex font-sans bg-[#F0F4F8]">
     <nav class="w-64 sidebar-frosted flex flex-col py-8 z-50 fixed h-full overflow-y-auto custom-scrollbar">
       <div class="px-8 mb-8 flex items-center gap-4 shrink-0">
-        <div class="relative group">
-          <svg width="48" height="48" class="relative h-12 w-12 rounded-lg bg-white shadow-lg p-1" viewBox="0 0 100 120">
-              <defs>
-                  <linearGradient id="scuYellow" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#FFC72C"/><stop offset="100%" stop-color="#EAAA00"/></linearGradient>
-                  <linearGradient id="scuTeal" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#00939D"/><stop offset="100%" stop-color="#00555A"/></linearGradient>
-              </defs>
-              <path d="M50 115 C50 115 90 95 90 30 V 10 L 50 0 L 10 10 V 30 C 10 95 50 115 50 115 Z" fill="white"/>
-              <path d="M50 55 L 50 5 L 15 15 C 15 35 25 50 50 55 Z" fill="url(#scuYellow)"/>
-              <path d="M50 55 L 50 5 L 85 15 C 85 35 75 50 50 55 Z" fill="url(#scuTeal)"/>
-              <path d="M50 65 L 50 110 C 25 100 15 80 15 40 C 15 60 25 65 50 65 Z" fill="url(#scuYellow)"/>
-              <path d="M50 65 L 50 110 C 75 100 85 80 85 40 C 85 60 75 65 50 65 Z" fill="url(#scuTeal)"/>
-          </svg>
-        </div>
+        <div class="py-8 flex justify-center">
+  <svg width="60" height="60" class="rounded-2xl bg-white/20 p-2.5 backdrop-blur-md" viewBox="0 0 120 120">
+    <path
+      d="M36 24 C31 24 26 29 26 34 V 49 C 26 54 21 54 21 54 C 21 54 26 54 26 59 V 74 C 26 79 31 84 36 84 M84 24 C89 24 94 29 94 34 V 49 C 94 54 99 54 99 54 C 99 54 94 54 94 59 V 74 C 94 79 89 84 84 84 Z"
+      fill="white"
+      opacity="0.15"
+      class="group-hover:opacity-20 transition-opacity"
+    />
+
+    <path
+      d="M36 24 C31 24 26 29 26 34 V 49 C 26 54 21 54 21 54 C 21 54 26 54 26 59 V 74 C 26 79 31 84 36 84 M84 24 C89 24 94 29 94 34 V 49 C 94 54 99 54 99 54 C 99 54 94 54 94 59 V 74 C 94 79 89 84 84 84 M68 18 L52 90"
+      fill="none"
+      stroke="white"
+      stroke-width="7"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      class="group-hover:stroke-[white] transition-colors"
+    />
+  </svg>
+</div>
         <div>
-            <h1 class="text-lg font-bold tracking-tight text-white">Southern Cross</h1>
-            <p class="text-xs text-blue-200 font-medium tracking-wide uppercase">University</p>
+            <h1 class="text-lg font-bold tracking-tight text-white">Intelligent Programming Education</h1>
+            <p class="text-xs text-blue-200 font-medium tracking-wide uppercase">System</p>
         </div>
       </div>
       
@@ -178,7 +185,7 @@ const fetchReminders = async () => {
         reminders.value = response.data;
     }
   } catch (error) {
-    console.error("[Layout] 提醒加载失败:", error.message);
+    console.error("[Layout] Warning of loading failure:", error.message);
     reminders.value = [];
   }
 };
@@ -194,13 +201,11 @@ const closeNotifications = (e) => {
 };
 
 /**
- * 🚀 修改后的精准跳转函数
- * 根据 index.js 中的路径: /student/assignments/submit/:assignId
+ * According to the index of path in js: / student/assignments/submit / : assignId
  */
 const goToAssignment = (id) => {
   showNotifications.value = false;
-  
-  // 使用 name 跳转更安全，或者直接拼接 path
+
   router.push({
     name: 'StudentSubmission',
     params: { assignId: id }
@@ -226,7 +231,7 @@ const pageTitle = computed(() => {
     '/student/profile': 'Profile Settings'
   };
   
-  // 匹配动态路由的标题逻辑
+  // Match the header logic of the dynamic route
   if (route.path.includes('/student/assignments/submit/')) return 'Submit Assignment';
   
   return map[route.path] || 'Student Space';

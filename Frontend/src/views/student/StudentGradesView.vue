@@ -187,7 +187,7 @@ import {
   Award, TrendingUp, CheckCircle2, Star, Clock, 
   ChevronDown, Lock, Loader2, Bot, FileText
 } from 'lucide-vue-next';
-import MarkdownIt from 'markdown-it'; // 导入 MarkdownIt
+import MarkdownIt from 'markdown-it';
 
 const md = new MarkdownIt({
   html: true,
@@ -200,7 +200,7 @@ const loading = ref(true);
 const expandedId = ref(null);
 const allRecords = ref([]);
 
-// Markdown 渲染函数
+// Markdown Rendering Function
 const renderMarkdown = (content) => {
   if (!content) return '';
   return md.render(content);
@@ -258,7 +258,7 @@ onMounted(fetchGrades);
 <style scoped>
 .expand-enter-active, .expand-leave-active { 
   transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1); 
-  max-height: 2000px; /* 增加高度限制以适应 Markdown 内容 */
+  max-height: 2000px;
   overflow: hidden; 
 }
 .expand-enter-from, .expand-leave-to { 
@@ -276,7 +276,7 @@ onMounted(fetchGrades);
   transition: transform 0.2s ease-out;
 }
 
-/* Markdown 样式修饰 */
+/* Markdown style modification */
 .markdown-body :deep(h1), .markdown-body :deep(h2), .markdown-body :deep(h3) {
   color: #1e3a8a;
   margin-top: 1rem;

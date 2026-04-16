@@ -84,7 +84,7 @@
 <script setup>
 import { computed } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { useAuthStore } from '../store/authStore'; // 引入 authStore
+import { useAuthStore } from '../store/authStore';
 import { 
   ShieldAlert, Users, UserPlus, LayoutDashboard, 
   Settings, Activity, LogOut, FileText 
@@ -93,9 +93,9 @@ import { ElMessageBox, ElMessage } from 'element-plus';
 
 const route = useRoute();
 const router = useRouter();
-const authStore = useAuthStore(); // 初始化 authStore
+const authStore = useAuthStore();
 
-// 优先从 store 获取用户名，保证状态实时同步
+// Get the username from the store first to ensure that the state is synchronized in real time
 const adminName = computed(() => authStore.user?.username || localStorage.getItem('username') || 'Admin');
 const activeRoute = computed(() => route.path);
 
@@ -107,7 +107,7 @@ const menuItems = [
 ];
 
 /**
- * 退出登录逻辑
+ * Logout Logon logic
  */
 const handleLogout = () => {
   ElMessageBox.confirm('Are you sure you want to exit the admin console?', 'Logout', {
@@ -116,15 +116,13 @@ const handleLogout = () => {
     type: 'warning',
     roundButton: true
   }).then(() => {
-    // 关键修复：统一调用 store 的登出方法
-    // 这样会自动清理 localStorage 以及重置 store 内的认证状态
     authStore.logout(); 
     
-    // 跳转回登录页面
+    // Logout Logon logic
     router.push('/login');
     ElMessage.success('Logged out successfully');
   }).catch(() => {
-    // 处理取消操作，避免控制台报错
+    // Handle cancellations to avoid console errors
     console.log('Logout cancelled');
   });
 };
@@ -150,7 +148,7 @@ const handleLogout = () => {
   border-radius: 10px;
 }
 
-/* 视图切换动画 */
+/* View switching animation */
 .fade-slide-enter-active,
 .fade-slide-leave-active {
   transition: all 0.3s ease;
@@ -166,7 +164,7 @@ const handleLogout = () => {
   transform: translateY(-10px);
 }
 
-/* 侧边栏活动项状态条 */
+/* Sidebar active item status bar */
 .active-nav {
   position: relative;
 }
