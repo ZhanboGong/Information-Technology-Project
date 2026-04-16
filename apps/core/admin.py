@@ -3,16 +3,14 @@ from django.utils.html import format_html
 from .models import User, Course, KnowledgePoint, Assignment, Submission, DockerReport, AIEvaluation, SystemConfiguration
 
 
-# 1. 定义 Docker 报告的内联显示 (保持只读，增加编译状态显示)
 class DockerReportInline(admin.StackedInline):
     model = DockerReport
     extra = 0
     readonly_fields = ('compile_status', 'exit_code', 'status', 'execution_time', 'stdout', 'stderr', 'created_at')
     can_delete = False
-    classes = ('collapse',) # 默认折叠，保持界面整洁
+    classes = ('collapse',)
 
 
-# 2. 修改 AI 评审内联 (在 Submission 详情页直接看本次评分)
 class AIEvaluationInline(admin.StackedInline):
     model = AIEvaluation
     extra = 0
@@ -24,10 +22,8 @@ class AIEvaluationInline(admin.StackedInline):
     can_delete = False
 
 
-# 3. 增强 Submission（提交记录）管理界面
 @admin.register(Submission)
 class SubmissionAdmin(admin.ModelAdmin):
-    # 🚀 优化点：增加 color_final_score，直接在列表对比最高分
     list_display = ('id', 'student', 'assignment', 'attempt_number', 'status', 'get_current_score', 'color_final_score', 'created_at')
     list_filter = ('status', 'assignment', 'created_at')
     search_fields = ('student__username', 'student__student_id_num', 'assignment__title')
@@ -43,7 +39,6 @@ class SubmissionAdmin(admin.ModelAdmin):
 
     @admin.display(description='历史最高记录', ordering='final_score')
     def color_final_score(self, obj):
-        """用颜色标识最高分，方便一眼定位优生"""
         score = obj.final_score or 0
         color = "#28a745" if score >= 90 else "#007bff" if score >= 60 else "#dc3545"
         return format_html(
@@ -53,7 +48,6 @@ class SubmissionAdmin(admin.ModelAdmin):
         )
 
 
-# 4. 注册其他基础业务表
 @admin.register(User)
 class UserAdmin(admin.ModelAdmin):
     list_display = ('username', 'student_id_num', 'role', 'class_name', 'is_staff')

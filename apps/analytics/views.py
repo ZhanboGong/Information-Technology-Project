@@ -157,4 +157,3 @@ class AnalyticsViewSet(viewsets.ViewSet):
                 "average_score": round(float(evals.aggregate(avg=Avg('total_score'))['avg'] or 0), 1)
             }
         })
-    

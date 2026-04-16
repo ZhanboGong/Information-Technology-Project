@@ -60,13 +60,12 @@ class CourseSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Course
-        fields = ['id', 'name', 'description', 'teacher', 'teacher_name', 'student_count', 'created_at']
-        read_only_fields = ['id', 'created_at']
+        fields = ['id', 'name', 'description', 'teacher', 'teacher_name', 'student_count', 'created_at', 'invite_code']
+        read_only_fields = ['id', 'created_at', 'invite_code']
 
 
 # --- 5. Assessment serializer ---
 class AssignmentSerializer(serializers.ModelSerializer):
-    # 你声明了它
     course_name = serializers.ReadOnlyField(source='course.name')
     kp_details = KnowledgePointSerializer(source='knowledge_points', many=True, read_only=True)
     attachment_name = serializers.SerializerMethodField()
@@ -197,7 +196,7 @@ class SubmissionSerializer(serializers.ModelSerializer):
 
 
 class UserProfileSerializer(serializers.ModelSerializer):
-    """用于管理员管理用户和用户查看个人资料的通用序列化器"""
+    """A general serializer used for administrators to manage users and for users to view their personal profiles"""
 
     class Meta:
         model = User

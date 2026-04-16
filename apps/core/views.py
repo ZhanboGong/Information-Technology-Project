@@ -1012,6 +1012,39 @@ class StudentCourseViewSet(viewsets.ReadOnlyModelViewSet):
         """
         return Course.objects.filter(students=self.request.user)
 
+    @action(detail=False, methods=['post'], url_path='join-by-code')
+    def join_by_code(self, request):
+        """
+        学生通过邀请码主动加入课程
+        """
+        code = request.data.get('invite_code', '').strip().upper()
+
+        if not code:
+            return Response({"error": "Please enter an invitation code"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            # 1. 查找课程
+            course = Course.objects.get(invite_code=code)
+
+            # 2. 检查该学生是否已经是该课程的成员
+            if course.students.filter(id=request.user.id).exists():
+                return Response({"error": f"You are already a member of '{course.name}'"},
+                                status=status.HTTP_400_BAD_REQUEST)
+
+            # 3. 将学生添加进课程的 ManyToMany 字段
+            course.students.add(request.user)
+
+            return Response({
+                "message": f"Successfully joined {course.name}!",
+                "course_id": course.id,
+                "course_name": course.name
+            }, status=status.HTTP_200_OK)
+
+        except Course.DoesNotExist:
+            return Response({"error": "Invalid invitation code. Please check again."}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({"error": f"Internal system error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 class StudentSubmissionViewSet(viewsets.ModelViewSet):
     """
@@ -1080,7 +1113,7 @@ class StudentSubmissionViewSet(viewsets.ModelViewSet):
             return Response({"message": "Submission successful. System processing in progress..."}, status=201)
 
         except Exception as e:
-            print(f"❌ ViewSet Create Error: {str(e)}")
+            print(f"ViewSet Create Error: {str(e)}")
             return Response({"error": str(e)}, status=500)
 
     def run_agent_pipeline(self, submission):
@@ -1410,11 +1443,20 @@ class AdminUserManagementViewSet(viewsets.ModelViewSet):
 
 
 class SystemMonitorView(APIView):
+    """
+    Administrator end: Full-stack system monitoring window.
+    This interface integrates real-time monitoring data from three levels:
+    1. Hardware node status (node load, running status).
+    2. Task queue details (Celery asynchronous batch processing task flow).
+    3. AI service performance (delay trends and token consumption statistics based on real logs from DeepSeek API).
+    Permission requirements:
+    - Identity verification is mandatory.
+    - The 'admin' administrator role is necessary.
+    """
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     def get(self, request):
         import random
-        # 1. 模拟系统节点状态 (保持不变)
         nodes = [
             {'name': 'Core API Server', 'status': 'Online', 'load': random.randint(20, 40),
              'desc': 'Django Gunicorn Stack'},
@@ -1422,7 +1464,7 @@ class SystemMonitorView(APIView):
             {'name': 'Redis Broker', 'status': 'Online', 'load': random.randint(1, 5), 'desc': 'Message Queue'},
         ]
 
-        # 2. 获取最近任务 (保持不变)
+        # 2. Get the latest task
         recent_tasks = Submission.objects.order_by('-created_at')[:5]
         queue_tasks = []
         status_map = {'pending': 'Pending', 'running': 'Running', 'completed': 'Success', 'failed': 'Failed'}
@@ -1434,17 +1476,17 @@ class SystemMonitorView(APIView):
                 'time': task.created_at
             })
 
-        # 3. 【核心增强】从 AIServiceLog 获取真实 AI 性能数据
-        # 获取最近 20 条日志用于绘制趋势图
+        # 3. Obtain the actual AI performance data from AIServiceLog
+        # Retrieve the last 20 logs for plotting the trend chart
         ai_logs = AIServiceLog.objects.order_by('-created_at')[:20]
 
-        # 计算平均延迟和 Token 总量
+        # Calculate the average delay and the total amount of Tokens
         if ai_logs.exists():
             avg_latency = sum(log.response_time for log in ai_logs) / ai_logs.count()
-            total_tokens_24h = sum(log.total_tokens for log in ai_logs)  # 简化逻辑，实际可按时间过滤
+            total_tokens_24h = sum(log.total_tokens for log in ai_logs)
 
-            # 构造趋势图数据 (response_time)
-            latency_history = [int(log.response_time * 1000) for log in reversed(ai_logs)]  # 转为毫秒
+            # Construct the trend chart data (response_time)
+            latency_history = [int(log.response_time * 1000) for log in reversed(ai_logs)]
         else:
             avg_latency = 0
             total_tokens_24h = 0
@@ -1468,12 +1510,19 @@ class SystemMonitorView(APIView):
 
 class AdminSystemLogView(APIView):
     """
-    Admin端：获取系统审计与AI调用日志
+    Administrator end: System Audit and AI Invocation Log View.
+    This interface provides deep transparency for the AI service layer (AIServiceLog), enabling administrators to monitor:
+    1. Interface stability: By observing the `status_code`, one can check if DeepSeek or other services frequently report errors.
+    2. Cost expenditure: By monitoring the `total_tokens`, one can assess the scale of a single request and evaluate the long-term operational cost.
+    3. Response performance: By capturing the `response_time`, one can detect fluctuations in the API provider and optimize the concurrent strategy.
+    Permission requirements:
+    - Identity verification is mandatory.
+    - The 'admin' administrator role is necessary.
     """
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     def get(self, request):
-        # 获取最近的 50 条 AI 调用日志
+        # Obtain the latest 50 AI invocation logs
         logs = AIServiceLog.objects.select_related().all().order_by('-created_at')[:50]
 
         log_data = []

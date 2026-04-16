@@ -85,4 +85,4 @@ def check_deadlines_and_send_reports():
             [teacher.email],
             fail_silently=False,
         )
-        print(f"📧 已向 {teacher.username} 发送作业 {assignment.title} 的成绩报告")
+        print(f"已向 {teacher.username} 发送作业 {assignment.title} 的成绩报告")

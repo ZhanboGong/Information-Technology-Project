@@ -160,7 +160,7 @@ class AIScorer:
         is_java = submission.file.name.endswith(('.java', '.zip'))
         lang_name = "Java" if is_java else "Python"
 
-        # 1. 获取源代码
+        # 1. Getting the source code
         if submission.sub_type == 'archive' and project_path:
             source_code = self._read_project_source(project_path)
         else:
@@ -170,19 +170,19 @@ class AIScorer:
             except:
                 source_code = "Unable to read source code content."
 
-        # 2. 准备上下文与 Rubric 配置
+        # 2. Prepare the context and Rubric configuration
         contexts = self.get_rag_contexts(submission)
         rubric_config = submission.assignment.rubric_config
         custom_dim_names = [i.get('criterion') for i in rubric_config.get('items', [])] if rubric_config.get(
             'items') else ["Logic", "Design", "Style"]
 
-        # 3. 构造沙箱事实证据
+        # 3. Construct sandbox fact evidence
         if not docker_report.compile_status:
             sandbox_evidence = f"🚨 Compilation Failed: The code did not compile successfully.\nError Stack Trace:\n{docker_report.stderr}"
         else:
             sandbox_evidence = f"✅ Execution Successful:\nSTDOUT: {docker_report.stdout or 'Empty'}\nSTDERR: {docker_report.stderr or 'None'}"
 
-        # 4. 构造深度评审 Prompt
+        # 4. Construct the deep review Prompt
         prompt = f"""
         You are a rigorous {lang_name} programming mentor. Please evaluate the student's submission based on the provided evidence and criteria.
 
@@ -232,7 +232,7 @@ class AIScorer:
                 # seed = 42
             )
 
-            # 监控日志
+            # Monitoring logs
             duration = time.time() - start_time
             if response.usage:
                 AIServiceLog.objects.create(

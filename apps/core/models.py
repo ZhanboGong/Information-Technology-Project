@@ -2,6 +2,12 @@ from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.conf import settings
 from django.core.cache import cache
+import random
+import string
+
+def generate_invite_code():
+    # Produces a combination of six capital letters and numbers
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
 
 
 # User Table
@@ -34,6 +40,14 @@ class Course(models.Model):
     teacher = models.ForeignKey(User, on_delete=models.CASCADE, related_name='teaching_courses', verbose_name="授课教师")
     students = models.ManyToManyField(User, related_name='enrolled_courses', blank=True, verbose_name="选课学生")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
+    invite_code = models.CharField(
+        max_length=10,
+        null=True,
+        unique=True,
+        blank=True,
+        default=generate_invite_code,
+        verbose_name="邀请码"
+    )
 
     def __str__(self):
         return self.name
@@ -145,12 +159,10 @@ class AIEvaluation(models.Model):
 
 # 8. System Configuration
 class SystemConfiguration(models.Model):
-    """系统全局配置（单例模式）"""
     deepseek_api_key = models.CharField(max_length=255, default="sk-f532188d5dd5436a920de5b44b1f9596", verbose_name="DeepSeek API Key", blank=True)
     deepseek_base_url = models.URLField(default="https://api.deepseek.com", verbose_name="DeepSeek Base URL")
     deepseek_model_name = models.CharField(max_length=100, default="deepseek-chat", verbose_name="模型名称")
 
-    # 可以在这里添加其他设置，比如：
     # max_tokens = models.IntegerField(default=2000)
     # temperature = models.FloatField(default=0.7)
 
@@ -159,19 +171,16 @@ class SystemConfiguration(models.Model):
         verbose_name_plural = "系统全局配置"
 
     def save(self, *args, **kwargs):
-        # 确保只有一条记录
         self.pk = 1
         super().save(*args, **kwargs)
-        # 更新后清除缓存，确保下次读取到最新值
         cache.delete('system_config')
 
     @classmethod
     def get_config(cls):
-        """高效获取配置的方法（带缓存）"""
         config = cache.get('system_config')
         if not config:
             config, created = cls.objects.get_or_create(pk=1)
-            cache.set('system_config', config, 3600)  # 缓存1小时
+            cache.set('system_config', config, 3600)
         return config
 
     def __str__(self):
