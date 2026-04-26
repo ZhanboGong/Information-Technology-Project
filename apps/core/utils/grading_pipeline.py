@@ -72,12 +72,54 @@ class GradingPipeline:
         :param work_dir: Source working directory path.
         :return: Sandbox run report after persistence.
         """
-        target_file = entry_point if entry_point else self.submission.file.path
+        target_file = None
+        valid_extensions = ('.py', '.java')
+
+        # 🚀 调试日志：核对传入参数
+        print(f"DEBUG | Received Params - entry_point: {entry_point}, work_dir: {work_dir}")
+
+        if work_dir and os.path.exists(work_dir):
+            # 🚀 诊断日志：强制列出解压目录下的所有文件结构，排查解压是否成功
+            print(f"🔍 Listing files in work_dir ({work_dir}):")
+            for root, dirs, files in os.walk(work_dir):
+                print(f"   Directory: {root}")
+                for f in files:
+                    print(f"     - {f}")
+
+            # 步骤 A：如果有传入入口点，优先合成绝对路径
+            if entry_point:
+                potential_path = os.path.join(work_dir, entry_point) if not os.path.isabs(entry_point) else entry_point
+                if os.path.exists(potential_path) and potential_path.lower().endswith(valid_extensions):
+                    target_file = potential_path
+                    print(f"✅ Resolved entry_point to: {target_file}")
+
+            # 步骤 B：如果入口点无效或未提供，执行递归搜索
+            if not target_file:
+                print(f"🔍 Entry point missing or invalid. Searching for code files in: {work_dir}")
+                for root, dirs, files in os.walk(work_dir):
+                    # 忽略隐藏文件夹
+                    dirs[:] = [d for d in dirs if not d.startswith('.')]
+                    for f in files:
+                        if f.lower().endswith(valid_extensions):
+                            target_file = os.path.join(root, f)
+                            print(f"✅ Auto-detected source file: {target_file}")
+                            break
+                    if target_file: break
+
+        # 🚀 修复逻辑：最后的兜底回退
+        if not target_file:
+            target_file = self.submission.file.path
+            print(f"ℹ️ No source file found in work_dir. Falling back to submission path: {target_file}")
+
+        print(f"🚀 Docker Pipeline final target path: {target_file}")
+
+        # 调用 Runner
         docker_res = self.runner.run_code(
             file_path=target_file,
-            is_project=bool(entry_point),
+            is_project=bool(work_dir),
             project_root=work_dir
         )
+
         report, _ = DockerReport.objects.update_or_create(
             submission=self.submission,
             defaults={

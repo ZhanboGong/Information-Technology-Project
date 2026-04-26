@@ -5,6 +5,7 @@ import io
 import uuid
 import shutil
 import pandas as pd
+import requests
 import traceback
 from apps.analytics.models import AIServiceLog
 from django.conf import settings
@@ -23,14 +24,22 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
+from .utils.plagiarism_detector import PlagiarismDetector
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 # Import the model and serializer
-from .models import User, Course, Assignment, Submission, AIEvaluation, KnowledgePoint, SystemConfiguration
+from .models import User, Course, Assignment, Submission, AIEvaluation, KnowledgePoint, SystemConfiguration, NotificationConfig
 from .serializers import (
     AssignmentSerializer,
     SubmissionSerializer,
     MyTokenObtainPairSerializer,
-    CourseSerializer, KnowledgePointSerializer, UserProfileSerializer, ChangePasswordSerializer, SystemConfigurationSerializer
+    CourseSerializer, KnowledgePointSerializer, UserProfileSerializer, ChangePasswordSerializer, SystemConfigurationSerializer,
+    NotificationConfigSerializer
 )
 from .utils.ai_scorer import AIScorer
 from .utils.project_analyzer import ProjectAnalyzer
@@ -381,6 +390,39 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
         return Response(serializer.data)
 
+    def destroy(self, request, *args, **kwargs):
+        """
+        删除作业逻辑：确保数据安全与逻辑一致性
+        """
+        instance = self.get_object()
+
+        # 1. 安全检查：使用更健壮的检查方式
+        # 无论你是否定义了 related_name，instance.submissions 都能根据你的配置灵活调整
+        # 如果你确定没改 related_name，submission_set 也是对的
+        has_submissions = Submission.objects.filter(assignment=instance).exists()
+
+        if has_submissions:
+            return Response({
+                "error": "This assignment already has student submissions. "
+                         "For data safety, please delete the submissions first or "
+                         "just modify the deadline to close the assignment."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # 2. 使用事务确保删除过程安全
+        try:
+            with transaction.atomic():
+                self.perform_destroy(instance)
+
+            return Response(
+                {"message": "Assignment deleted successfully"},
+                status=status.HTTP_200_OK
+            )
+        except Exception as e:
+            return Response(
+                {"error": f"Failed to delete assignment: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
     @action(detail=True, methods=['post'], url_path='publish-all')
     def publish_all_results(self, request, pk=None):
         """
@@ -721,7 +763,407 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
             "evaluation": evaluation_data
         })
 
+    @action(detail=False, methods=['get'], url_path='export-pdf-report')
+    def export_pdf_report(self, request):
+        import io
+        import json
+        import re
+        from django.http import HttpResponse
+        from django.shortcuts import get_object_or_404
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.lib.styles import getSampleStyleSheet
+        from django.utils.encoding import escape_uri_path
 
+        # 1. 获取数据
+        submission_id = request.query_params.get('submission_id')
+        submission = get_object_or_404(Submission, id=submission_id)
+        assignment = submission.assignment
+        evaluation = getattr(submission, 'ai_evaluation', None)
+
+        if not evaluation:
+            return Response({"error": "No evaluation record found"}, status=400)
+
+        # --- 2. 核心修复：从 ai_raw_feedback 解析单项得分 ---
+        rubric_items = assignment.rubric_config.get('items', [])
+
+        # 尝试解析 ai_raw_feedback 文本字段
+        student_scores_data = {}
+        if evaluation.ai_raw_feedback:
+            try:
+                # 移除可能的 Markdown 代码块标记 ```json ... ```
+                clean_json_str = re.sub(r'```json|```', '', evaluation.ai_raw_feedback).strip()
+                parsed_data = json.loads(clean_json_str)
+
+                # 兼容不同的 JSON 结构
+                if isinstance(parsed_data, dict):
+                    # 优先取 scores 里的内容，如果本身就是扁平字典则取自身
+                    student_scores_data = parsed_data.get('scores', parsed_data.get('kp_scores', parsed_data))
+            except Exception as e:
+                print(f"JSON Parsing Error: {e}")
+                student_scores_data = {}
+
+        # 终极清洗函数：去掉所有空格、换行、特殊字符，确保 Key 能匹配上
+        def sanitize_key(text):
+            return re.sub(r'[\s\W_]+', '', str(text)).lower()
+
+        # 建立清洗后的分数字典映射 (例如: {"collectionsmanagementparts35": 78})
+        clean_scores_map = {sanitize_key(k): v for k, v in student_scores_data.items()}
+
+        # --- 3. PDF 基础设置 ---
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+        elements = []
+        styles = getSampleStyleSheet()
+
+        # 头部信息
+        elements.append(Paragraph(f"<b>Performance Report: {assignment.title}</b>", styles['Title']))
+        elements.append(Paragraph(
+            f"Student: {submission.student.first_name or submission.student.username} ({submission.student.student_id_num})",
+            styles['Normal']))
+        elements.append(
+            Paragraph(f"Final Score: <font color='blue' size='14'><b>{evaluation.total_score}</b></font> / 100",
+                      styles['Normal']))
+        elements.append(Spacer(1, 20))
+
+        # --- 4. 构建 Rubric 矩阵 ---
+        level_map = [
+            {"label": "High Distinction", "match": "highdistinction"},
+            {"label": "Distinction", "match": "distinction"},
+            {"label": "Credit", "match": "credit"},
+            {"label": "Pass", "match": "pass"},
+            {"label": "Fail", "match": "fail"},
+        ]
+
+        header = ["Grade Level"]
+        for item in rubric_items:
+            c_name = item.get('criterion', 'Unknown')
+            header.append(Paragraph(f"<b>{c_name}</b>", styles['BodyText']))
+        table_data = [header]
+
+        for lv in level_map:
+            row = [lv['label']]
+            for item in rubric_items:
+                detailed = item.get('detailed_rubric', {})
+                desc_text = "N/A"
+                for k, v in detailed.items():
+                    if lv['match'] in sanitize_key(k):
+                        desc_text = v
+                        break
+                row.append(Paragraph(desc_text, styles['BodyText']))
+            table_data.append(row)
+
+        col_count = len(rubric_items) + 1
+        col_widths = [75] + [455 / (col_count - 1)] * (col_count - 1)
+        t = Table(table_data, colWidths=col_widths)
+
+        table_style = [
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.whitesmoke),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('FONTSIZE', (0, 0), (-1, -1), 7),
+        ]
+
+        # --- 5. 计算染色位置 & 提取具体分数 ---
+        # 我们在这里顺便计算明细行数据
+        breakdown_rows = []
+
+        for col_idx, item in enumerate(rubric_items, start=1):
+            orig_criterion = item.get('criterion', '')
+            c_key = sanitize_key(orig_criterion)
+
+            # 从解析出的 ai_raw_feedback 中取值
+            score_val = clean_scores_map.get(c_key, 0)
+            try:
+                f_score = float(score_val)
+            except:
+                f_score = 0
+
+            # 保存用于明细表显示
+            breakdown_rows.append([Paragraph(orig_criterion, styles['Normal']), f"{item.get('weight')}%", f"{f_score}"])
+
+            # 只有分数大于0才染色
+            if f_score > 0:
+                target_row = 5  # Fail
+                if f_score >= 85:
+                    target_row = 1
+                elif f_score >= 75:
+                    target_row = 2
+                elif f_score >= 65:
+                    target_row = 3
+                elif f_score >= 50:
+                    target_row = 4
+
+                table_style.append(('BACKGROUND', (col_idx, target_row), (col_idx, target_row), colors.lightgreen))
+
+        t.setStyle(TableStyle(table_style))
+        elements.append(t)
+
+        # --- 6. 分数明细表 ---
+        elements.append(Spacer(1, 25))
+        elements.append(Paragraph("<b>Score Breakdown Details</b>", styles['Heading3']))
+
+        detail_header = [["Assessment Criterion", "Weight", "Score"]]
+        bt = Table(detail_header + breakdown_rows, colWidths=[330, 80, 120], hAlign='LEFT')
+        bt.setStyle(TableStyle([
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.whitesmoke),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('ALIGN', (1, 0), (-1, -1), 'CENTER'),
+        ]))
+        elements.append(bt)
+
+        # 生成
+        doc.build(elements)
+        buffer.seek(0)
+
+        filename = f"Report_{submission.student.student_id_num}.pdf"
+        response = HttpResponse(buffer, content_type='application/pdf')
+        response['Content-Disposition'] = f"attachment; filename*=utf-8''{escape_uri_path(filename)}"
+        return response
+
+    @action(detail=True, methods=['get'], url_path='export-all-pdf-reports')
+    def export_all_pdf_reports(self, request, pk=None):
+        import io, json, re, zipfile
+        from django.http import HttpResponse
+        from django.utils.encoding import escape_uri_path
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.lib.styles import getSampleStyleSheet
+
+        assignment = self.get_object()
+
+        # 1. 参考 download_all_submissions 的筛选逻辑：获取每个学生最高分的提交
+        all_subs = Submission.objects.filter(assignment=assignment, status='completed').order_by(
+            'student', '-final_score', '-ai_evaluation__total_score', '-id'
+        ).select_related('student', 'ai_evaluation')
+
+        # 内存去重，确保每个人只有一份最好的成绩单
+        best_submissions = []
+        seen_students = set()
+        for s in all_subs:
+            if s.student_id not in seen_students:
+                best_submissions.append(s)
+                seen_students.add(s.student_id)
+
+        if not best_submissions:
+            return Response({"error": "No completed submissions found to export"}, status=404)
+
+        # 2. 初始化 ZIP 内存流 (完全参照你成功的代码)
+        byte_io = io.BytesIO()
+
+        def sanitize_key(text):
+            return re.sub(r'[\s\W_]+', '', str(text)).lower()
+
+        with zipfile.ZipFile(byte_io, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for sub in best_submissions:
+                evaluation = getattr(sub, 'ai_evaluation', None)
+                if not evaluation:
+                    continue
+
+                try:
+                    # --- 为每个学生生成 PDF 字节流 ---
+                    pdf_buffer = io.BytesIO()
+                    doc = SimpleDocTemplate(pdf_buffer, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30,
+                                            bottomMargin=30)
+                    elements = []
+                    styles = getSampleStyleSheet()
+
+                    # 头部信息
+                    elements.append(Paragraph(f"<b>Performance Report: {assignment.title}</b>", styles['Title']))
+                    elements.append(Paragraph(
+                        f"Student: {sub.student.first_name or sub.student.username} ({sub.student.student_id_num})",
+                        styles['Normal']))
+                    elements.append(Paragraph(
+                        f"Final Score: <font color='blue' size='14'><b>{evaluation.total_score}</b></font> / 100",
+                        styles['Normal']))
+                    elements.append(Spacer(1, 20))
+
+                    # 解析分数 (增强解析逻辑)
+                    student_scores_data = {}
+                    if evaluation.ai_raw_feedback:
+                        try:
+                            json_str = re.sub(r'```json|```', '', str(evaluation.ai_raw_feedback)).strip()
+                            match = re.search(r'(\{.*\})', json_str, re.DOTALL)
+                            if match:
+                                data_obj = json.loads(match.group(1))
+                                student_scores_data = data_obj.get('scores', data_obj.get('kp_scores', data_obj))
+                        except:
+                            pass
+
+                    this_clean_map = {sanitize_key(k): v for k, v in student_scores_data.items()}
+
+                    # 构建 Rubric 矩阵
+                    level_map = [
+                        {"label": "High Distinction", "match": "highdistinction"},
+                        {"label": "Distinction", "match": "distinction"},
+                        {"label": "Credit", "match": "credit"},
+                        {"label": "Pass", "match": "pass"},
+                        {"label": "Fail", "match": "fail"},
+                    ]
+                    rubric_items = assignment.rubric_config.get('items', [])
+                    header = ["Grade Level"] + [Paragraph(f"<b>{i.get('criterion')}</b>", styles['BodyText']) for i in
+                                                rubric_items]
+                    table_data = [header]
+
+                    for lv in level_map:
+                        row = [lv['label']]
+                        for item in rubric_items:
+                            detailed = item.get('detailed_rubric', {})
+                            desc_text = "N/A"
+                            for k, v in detailed.items():
+                                if lv['match'] in sanitize_key(k):
+                                    desc_text = v
+                                    break
+                            row.append(Paragraph(desc_text, styles['BodyText']))
+                        table_data.append(row)
+
+                    # 样式与染色 (关键：每次循环重置)
+                    this_t_style = [
+                        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.whitesmoke),
+                        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                        ('FONTSIZE', (0, 0), (-1, -1), 7),
+                    ]
+
+                    breakdown_rows = []
+                    for col_idx, item in enumerate(rubric_items, start=1):
+                        orig_c = item.get('criterion', '')
+                        c_key = sanitize_key(orig_c)
+                        score_val = this_clean_map.get(c_key, 0)
+                        try:
+                            fs = float(score_val)
+                        except:
+                            fs = 0
+
+                        breakdown_rows.append([Paragraph(orig_c, styles['Normal']), f"{item.get('weight')}%", f"{fs}"])
+
+                        if fs > 0:
+                            row_idx = 1 if fs >= 85 else 2 if fs >= 75 else 3 if fs >= 65 else 4 if fs >= 50 else 5
+                            this_t_style.append(
+                                ('BACKGROUND', (col_idx, row_idx), (col_idx, row_idx), colors.lightgreen))
+
+                    t = Table(table_data, colWidths=[75] + [455 / (len(rubric_items) or 1)] * len(rubric_items))
+                    t.setStyle(TableStyle(this_t_style))
+                    elements.append(t)
+                    elements.append(Spacer(1, 20))
+
+                    bt = Table([["Criterion", "Weight", "Score"]] + breakdown_rows, colWidths=[330, 80, 120],
+                               hAlign='LEFT')
+                    bt.setStyle(TableStyle([('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                                            ('BACKGROUND', (0, 0), (-1, 0), colors.whitesmoke),
+                                            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold')]))
+                    elements.append(bt)
+
+                    # 生成 PDF 二进制流
+                    doc.build(elements)
+                    pdf_content = pdf_buffer.getvalue()
+
+                    # 写入 ZIP (参考你的 arc_name 命名规则)
+                    arc_name = f"{sub.student.student_id_num}_{sub.student.username}_Report.pdf"
+                    zip_file.writestr(arc_name, pdf_content)
+
+                except Exception as e:
+                    print(f"FAILED TO GENERATE PDF for {sub.student.student_id_num}: {e}")
+                    continue
+
+        # 3. 构造响应 (完全参考你成功的代码结构)
+        byte_io.seek(0)
+        zip_filename = f"PDF_Reports_{assignment.title}.zip"
+
+        response = HttpResponse(byte_io, content_type='application/zip')
+        # 必须使用 escape_uri_path 处理中文文件名
+        response['Content-Disposition'] = f"attachment; filename*=utf-8''{escape_uri_path(zip_filename)}"
+        return response
+
+    @action(detail=False, methods=['get'], url_path='all-appeals')
+    def get_all_appeals(self, request):
+        """
+        老师查看名下所有作业的申诉记录。
+
+        功能亮点：
+        1. 数据隔离：仅返回当前老师发布的作业相关的申诉。
+        2. 性能优化：使用 select_related 一次性抓取学生、作业和评价信息，避免 N+1 查询。
+        3. 决策支持：直接透出 ai_judgment 和 status，方便老师快速筛选 AI 建议驳回的记录。
+        """
+        from .models import Appeal
+
+        # 1. 过滤逻辑：找到所有属于当前老师的作业的申诉
+        appeals = Appeal.objects.filter(
+            evaluation__submission__assignment__teacher=request.user
+        ).select_related(
+            'evaluation__submission__student',
+            'evaluation__submission__assignment',
+            'evaluation'
+        ).order_by('-created_at')  # 按时间倒序，优先处理最新的申诉
+
+        # 2. 构造返回数据
+        data = []
+        for a in appeals:
+            sub = a.evaluation.submission
+            data.append({
+                "id": a.id,
+                "submission_id": sub.id,
+                "assignment_title": sub.assignment.title,
+                # 🚀 直接平铺学生信息，方便前端直接 {{ appeal.student_name }} 读取
+                "student_name": sub.student.first_name or sub.student.username,
+                "student_id_num": sub.student.student_id_num,
+                "class_name": sub.student.class_name,
+
+                "original_score": float(a.evaluation.total_score),
+                "student_reason": a.student_reason,
+                "ai_judgment": a.ai_judgment,
+                "status": a.status,
+                "status_display": a.get_status_display(),
+                "created_at": a.created_at,
+                "teacher_remark": a.teacher_remark,
+                "adjusted_score": float(a.adjusted_score) if a.adjusted_score else None
+            })
+
+        return Response(data)
+
+    @action(detail=True, methods=['post'], url_path='resolve-appeal')
+    def resolve_appeal(self, request, pk=None):
+        """
+        老师处理申诉：决定最终分数并结案
+        """
+        from .models import Appeal
+        # 1. 获取申诉记录
+        appeal = get_object_or_404(Appeal, id=pk)
+
+        # 2. 获取参数
+        new_score = request.data.get('adjusted_score')  # 老师输入的新分数
+        teacher_remark = request.data.get('teacher_remark')  # 老师的审核评语
+
+        with transaction.atomic():
+            # 3. 如果老师给出了新分数，直接覆盖 AI 的评分记录 (响应你的问题三逻辑)
+            if new_score is not None:
+                evaluation = appeal.evaluation
+                evaluation.total_score = new_score
+                evaluation.teacher_reviewed = True
+                evaluation.save()
+
+                # 4. 同步更新 Submission 表的 final_score (确保成绩单显示最新最高分)
+                submission = evaluation.submission
+                submission.final_score = new_score
+                submission.save()
+
+                appeal.adjusted_score = new_score
+
+            # 5. 更新申诉单状态
+            appeal.status = 'completed'
+            appeal.teacher_remark = teacher_remark
+            appeal.save()
+
+            # 6. 将提交记录的状态从 appealing 恢复为已完成
+            # 这样学生在前端看到的状态就会变回正常的“已完成”
+            sub = appeal.evaluation.submission
+            sub.status = 'completed'
+            sub.save()
+
+        return Response({"message": "申诉处理成功，分数已同步更新"})
 
 
 class KnowledgePointViewSet(viewsets.ModelViewSet):
@@ -773,7 +1215,29 @@ class TeacherCourseViewSet(viewsets.ModelViewSet):
         :return:
         """
         # Force the teacher field of the course to be the current logged-in user
-        serializer.save()
+        if self.request.user.role != 'admin':
+            serializer.save(teacher=self.request.user)
+        else:
+            serializer.save()
+
+    def perform_update(self, serializer):
+        """
+
+        :param serializer:
+        :return:
+        """
+        if self.request.user.role != 'admin':
+            serializer.save(teacher=self.request.user)
+        else:
+            serializer.save()
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if instance.assignments.exists():
+            return Response({"error": "There are already assignments for this course. Please delete them first."}, status=400)
+
+        self.perform_destroy(instance)
+        return Response({"message": "Course deleted successfully"}, status=204)
 
     @action(detail=True, methods=['get'], url_path='students')
     def enrolled_students(self, request, pk=None):
@@ -991,6 +1455,98 @@ class StudentAssignmentViewSet(viewsets.ReadOnlyModelViewSet):
             "submitted_at": submission.created_at,
             "attempt_count": Submission.objects.filter(student=request.user, assignment=assignment).count()
         })
+
+
+    @action(detail=True, methods=['post'], url_path='submit-appeal')
+    def submit_appeal(self, request, pk=None):
+        """
+        学生提交申诉：支持跨提交记录的“作业级”去重锁定
+        """
+        assignment = self.get_object()
+        student_reason = request.data.get('reason')
+
+        if not student_reason:
+            return Response({"error": "请输入申诉理由"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 1. 获取申诉主体：找到该学生在该作业下的最高分提交记录
+        submission = Submission.objects.filter(
+            assignment=assignment,
+            student=request.user,
+            status='completed'
+        ).select_related('ai_evaluation').order_by('-final_score').first()
+
+        if not submission or not hasattr(submission, 'ai_evaluation'):
+            return Response({"error": "未找到已评分的有效记录，无法发起申诉"}, status=status.HTTP_400_BAD_REQUEST)
+
+        from .models import Appeal
+
+        # 2. 🚀 【核心逻辑】：跨提交记录的重复检查
+        # 我们不再只检查当前的 submission，而是检查该学生针对该 assignment 是否已有任何 Appeal 存在
+        def create_placeholder_safely():
+            with transaction.atomic():
+                # 锁定检查：通过关联路径 Appeal -> AIEvaluation -> Submission -> Assignment
+                already_appealed = Appeal.objects.filter(
+                    evaluation__submission__assignment=assignment,
+                    evaluation__submission__student=request.user
+                ).exists()
+
+                if already_appealed:
+                    return None
+
+                # 3. 🚀 【立即占位】：在调用 AI 前，先在数据库入库存证
+                appeal = Appeal.objects.create(
+                    evaluation=submission.ai_evaluation,
+                    student_reason=student_reason,
+                    status='pending_ai',
+                    ai_judgment="AI 正在审计代码逻辑，请稍候..."
+                )
+
+                # 锁定当前 Submission 状态为申诉中
+                submission.status = 'appealing'
+                submission.save(update_fields=['status'])
+
+                return appeal
+
+        # 执行“占位”函数
+        appeal_placeholder = create_placeholder_safely()
+
+        # 如果占位返回 None，说明已经申诉过了
+        if not appeal_placeholder:
+            return Response({"error": "您已针对该作业提交过申诉，请勿重复操作"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # -----------------------------------------------------------
+        # 此时，数据库记录已 Commit。即便 AI 运行需要 20 秒，
+        # 任何其他并发请求都会因为上面的 already_appealed 检查而被拦截。
+        # -----------------------------------------------------------
+
+        # 4. 🚀 执行耗时的 AI 审计服务 (在事务之外)
+        from .utils.appeal_service import AppealService
+        try:
+            review_result = AppealService.process_student_appeal(submission, student_reason)
+
+            # 5. 回填 AI 审计结果并流转状态
+            is_reasonable = review_result.get('is_reasonable', False)
+
+            appeal_placeholder.ai_judgment = review_result.get('ai_judgment', "AI 已完成审计")
+            # 状态分流：通过 AI 预审则转给教师，否则 AI 直接驳回
+            appeal_placeholder.status = 'pending_teacher' if is_reasonable else 'rejected_by_ai'
+            appeal_placeholder.save()
+
+            return Response({
+                "status": "success",
+                "is_reasonable": is_reasonable,
+                "message": review_result.get('reply_for_student', "申诉已处理")
+            }, status=status.HTTP_201_CREATED)
+
+        except Exception as e:
+            # 异常兜底：如果 AI 挂了，直接标记为待人工复核，不让学生申诉失败
+            appeal_placeholder.ai_judgment = f"AI 审计服务异常: {str(e)}"
+            appeal_placeholder.status = 'pending_teacher'
+            appeal_placeholder.save()
+            return Response({
+                "error": "AI 预审超时，系统已自动为您转交教师人工复核",
+                "is_reasonable": True
+            }, status=status.HTTP_200_OK)
 
 
 class StudentCourseViewSet(viewsets.ReadOnlyModelViewSet):
@@ -1293,6 +1849,40 @@ class SystemConfigViewSet(viewsets.ViewSet):
             return Response({"message": "System configuration has been updated.", "data": serializer.data})
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+    @action(detail=False, methods=['post'], url_path='test-connection')
+    def test_connection(self, request):
+        import requests
+        config_data = request.data
+        api_key = config_data.get('deepseek_api_key')
+        base_url = config_data.get('deepseek_base_url', 'https://api.deepseek.com').rstrip('/')
+
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+        try:
+            # 1. 测试模型可用性
+            models_res = requests.get(f"{base_url}/models", headers=headers, timeout=10)
+
+            # 2. 尝试获取余额 (适配大多数中转商路径)
+            clean_url = base_url.replace('/v1', '')
+            balance_res = requests.get(f"{clean_url}/dashboard/billing/subscription", headers=headers, timeout=10)
+
+            balance_data = "N/A"
+            if balance_res.status_code == 200:
+                b_json = balance_res.json()
+                total = b_json.get('hard_limit_usd', 0)
+                usage = b_json.get('total_usage', 0)
+                balance_data = f"${round(total - usage, 3)}"
+
+            if models_res.status_code == 200:
+                return Response({
+                    "status": "success",
+                    "balance": balance_data,
+                    "models": [m.get('id') for m in models_res.json().get('data', [])[:3]]  # 取前3个
+                })
+            return Response({"message": "Invalid Key or URL"}, status=400)
+        except Exception as e:
+            return Response({"message": str(e)}, status=500)
+
 
 class AdminDashboardStatsView(APIView):
     """
@@ -1538,3 +2128,34 @@ class AdminSystemLogView(APIView):
             })
 
         return Response(log_data)
+
+
+class NotificationConfigViewSet(viewsets.ModelViewSet):
+    queryset = NotificationConfig.objects.all()
+    serializer_class = NotificationConfigSerializer
+    permission_classes = [IsAuthenticated]
+
+    @action(detail=False, methods=['get', 'put', 'patch'], url_path='me')
+    def manage_my_config(self, request):
+        """
+        专门处理 /api/notification-config/me/
+        GET: 获取当前老师的配置
+        PUT/PATCH: 更新当前老师的配置
+        """
+        # 获取或创建当前老师的配置
+        config, created = NotificationConfig.objects.get_or_create(
+            teacher=request.user,
+            defaults={'remind_before_hours': 0} # 如果是老用户没有配置，自动补齐
+        )
+
+        if request.method == 'GET':
+            serializer = self.get_serializer(config)
+            return Response(serializer.data)
+
+        elif request.method in ['PUT', 'PATCH']:
+            # 部分更新或全部更新
+            serializer = self.get_serializer(config, data=request.data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                return Response(serializer.data)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

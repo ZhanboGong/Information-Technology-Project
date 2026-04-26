@@ -171,6 +171,17 @@ CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 
+# 🚀 增加 Redis 缓存配置，实现进程间数据同步
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": "redis://127.0.0.1:6379/1", # 使用库 1，与 Celery 的库 0 分开
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+        }
+    }
+}
+
 
 # Allow access to specific domains
 CORS_ALLOWED_ORIGINS = [
@@ -185,20 +196,20 @@ CORS_ALLOW_CREDENTIALS = True
 
 # 邮件配置
 # EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST = 'smtp.qq.com'  # 发件服务器地址
 EMAIL_PORT = 465
 EMAIL_USE_SSL = True
 EMAIL_HOST_USER = '3148556817@qq.com'  # 邮箱地址
-EMAIL_HOST_PASSWORD = 'your-auth-token'      # 邮箱授权码，非登录密码
-DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
+EMAIL_HOST_PASSWORD = 'nxqznjihpwohdcfc'      # 邮箱授权码，非登录密码
+DEFAULT_FROM_EMAIL = f"AI Grading System <{EMAIL_HOST_USER}>"
 
 from celery.schedules import crontab
 
 CELERY_BEAT_SCHEDULE = {
-    'check-deadlines-every-hour': {
+    'dispatch-notifications-every-minute': {
         'task': 'apps.core.tasks.check_deadlines_and_send_reports',
-        'schedule': crontab(minute=0),  # 每小时整点执行一次
+        'schedule': 60.0, # 每分钟扫描一次任务表
     },
 }
 

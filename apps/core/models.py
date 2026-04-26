@@ -1,4 +1,8 @@
+from datetime import timedelta
+
 from django.db import models
+from django.db.models.signals import post_save
+from django.dispatch import receiver
 from django.contrib.auth.models import AbstractUser
 from django.conf import settings
 from django.core.cache import cache
@@ -27,6 +31,22 @@ class User(AbstractUser):
 
     def __str__(self):
         return f"{self.username} ({self.get_role_display()})"
+
+
+@receiver(post_save, sender=User)
+def create_default_notification_config(sender, instance, created, **kwargs):
+    """
+    当新用户被创建，且角色是老师时，自动生成全局通知配置
+    """
+    if created and instance.role == 'teacher':
+        NotificationConfig.objects.get_or_create(
+            teacher=instance,
+            defaults={
+                'enable_report': True,
+                'remind_before_hours': 0,
+                'subject_template': "【系统通知】作业截止统计报告：《{title}》"
+            }
+        )
 
 
 # Course Table
@@ -85,7 +105,12 @@ class Assignment(models.Model):
     """
     title = models.CharField(max_length=200, verbose_name="作业标题")
     content = models.TextField(verbose_name="作业要求")
-    course = models.ForeignKey(Course, on_delete=models.CASCADE, verbose_name="所属课程")
+    course = models.ForeignKey(
+        Course,
+        on_delete=models.CASCADE,
+        related_name='assignments',
+        verbose_name="所属课程"
+    )
     deadline = models.DateTimeField(verbose_name="截止日期")
     rubric_config = models.JSONField(help_text="存储各维度的评分标准", verbose_name="评分维度配置")
     max_attempts = models.IntegerField(default=3, verbose_name="最大允许提交次数")
@@ -95,6 +120,8 @@ class Assignment(models.Model):
     category = models.CharField(max_length=50, default='basic', verbose_name="难度分类")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    # Sprint 2
+    report_sent = models.BooleanField(default=False, verbose_name="是否已发送截止报告")
     attachment = models.FileField(
         upload_to='assignments/attachments/%Y/%m/%d/',
         null=True,
@@ -113,7 +140,7 @@ class Submission(models.Model):
     It acts as a state carrier for the Pipeline that keeps track of the final score for each attempt.
     """
     SUBMISSION_TYPE_CHOICES = (('file', '单文件'), ('archive', '项目压缩包'))
-    STATUS_CHOICES = (('pending', '待处理'), ('running', '运行中'), ('completed', '已完成'), ('failed', '失败'))
+    STATUS_CHOICES = (('pending', '待处理'), ('running', '运行中'), ('completed', '已完成'), ('failed', '失败'), ('appealing', '申诉中'))
     sub_type = models.CharField(max_length=10, choices=SUBMISSION_TYPE_CHOICES, default='file')
     student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='submissions')
     assignment = models.ForeignKey(Assignment, on_delete=models.CASCADE)
@@ -156,6 +183,14 @@ class AIEvaluation(models.Model):
     raw_response = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    # Sprint 2
+    plagiarism_info = models.JSONField(
+        null=True,
+        blank=True,
+        verbose_name="查重信息",
+        help_text="格式: {'max_similarity': 0.85, 'target_student': '张三', 'target_submission_id': 101}"
+    )
+
 
 # 8. System Configuration
 class SystemConfiguration(models.Model):
@@ -174,14 +209,84 @@ class SystemConfiguration(models.Model):
         self.pk = 1
         super().save(*args, **kwargs)
         cache.delete('system_config')
+        print(f"DEBUG: Configuration saved. New model: {self.deepseek_model_name}")
 
     @classmethod
     def get_config(cls):
         config = cache.get('system_config')
         if not config:
             config, created = cls.objects.get_or_create(pk=1)
-            cache.set('system_config', config, 3600)
+            cache.set('system_config', config, 600)
         return config
 
     def __str__(self):
         return "系统全局配置"
+
+
+# Sprint 2
+class Appeal(models.Model):
+    STATUS_CHOICES = (
+        ('pending_ai', 'AI 审核中'),
+        ('rejected_by_ai', 'AI 驳回'),
+        ('pending_teacher', '待教师复核'),
+        ('completed', '处理完成')
+    )
+    # 关联评分记录
+    evaluation = models.OneToOneField('AIEvaluation', on_delete=models.CASCADE, related_name='appeal')
+    # 学生诉求
+    student_reason = models.TextField(verbose_name="学生申诉理由")
+    # AI 初审意见
+    ai_judgment = models.TextField(null=True, blank=True, verbose_name="AI 初审意见")
+    # 最终处理状态
+    adjusted_score = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name="调整后分数"
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending_ai')
+    # 教师备注
+    teacher_remark = models.TextField(null=True, blank=True, verbose_name="教师复核备注")
+    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class NotificationConfig(models.Model):
+    """
+    老师的系统全局通知偏好。
+    每个老师 ID 仅对应一条记录，实现“一劳永逸”的设置。
+    """
+    teacher = models.OneToOneField(
+        'User',
+        on_delete=models.CASCADE,
+        related_name='notification_config',
+        limit_choices_to={'role': 'teacher'},
+        verbose_name="所属教师"
+    )
+
+    # 全局开关：老师是否想接收截止报告
+    enable_report = models.BooleanField(
+        default=True,
+        verbose_name="开启截止报告通知"
+    )
+
+    # 全局偏移：默认在截止前多久发送
+    remind_before_hours = models.IntegerField(
+        default=0,
+        verbose_name="提醒偏移小时数",
+        help_text="0为截止时发送，正数代表提前发送"
+    )
+
+    # 全局模板：邮件标题长什么样
+    subject_template = models.CharField(
+        max_length=255,
+        default="【系统通知】作业截止统计报告：《{title}》",
+        verbose_name="标题模板"
+    )
+
+    class Meta:
+        verbose_name = "全局通知配置"
+
+    def __str__(self):
+        return f"{self.teacher.username} 的系统设置"

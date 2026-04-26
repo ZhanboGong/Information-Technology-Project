@@ -1,14 +1,16 @@
 import os
 import shutil
+import json
+import re
 from celery import shared_task
 from django.utils import timezone
 from datetime import timedelta
-
-from Backend import settings
-from .models import Assignment, Submission
-from .utils.grading_pipeline import GradingPipeline
+from django.db.models import Max, Avg
 from django.core.mail import send_mail
 
+from Backend import settings
+from .models import Assignment, Submission, User
+from .utils.grading_pipeline import GradingPipeline
 
 @shared_task
 def run_grading_task(submission_id, temp_workspace, entry_point=None):
@@ -30,53 +32,142 @@ def run_grading_task(submission_id, temp_workspace, entry_point=None):
     try:
         pipeline = GradingPipeline(submission_id)
 
-
-        if entry_point:
-            pipeline.run_full_pipeline(entry_point=entry_point, work_dir=temp_workspace)
-        else:
-            pipeline.run_full_pipeline()
+        # 🚀 核心修复：无论 entry_point 是否有值，都必须传入 work_dir (即 temp_workspace)
+        # 这样当 entry_point 为 None 时，Pipeline 内部的搜索逻辑才能在 temp_workspace 里找到代码文件
+        pipeline.run_full_pipeline(entry_point=entry_point, work_dir=temp_workspace)
 
     except Exception as e:
         print(f"🚨 Celery Task Error: {str(e)}")
     finally:
+        # 无论成功失败，清理临时目录
         if temp_workspace and os.path.exists(temp_workspace):
             shutil.rmtree(temp_workspace, ignore_errors=True)
             print(f" Temporary directory cleared: {temp_workspace}")
 
-# Sprint 2
+
+# ---------------------------------------------------------
+# 任务 2: 全局动态通知调度器 (由 Celery Beat 每分钟触发)
+# ---------------------------------------------------------
 @shared_task
 def check_deadlines_and_send_reports():
     """
-    Check the deadline and send a grade report to the teacher
+    根据老师的全局 NotificationConfig 偏好，动态扫描符合条件的作业。
     """
     now = timezone.now()
-    one_hour_ago = now - timezone.timedelta(hours=1)
 
-    pending_assignments = Assignment.objects.filter(
-        deadline__lte=now,
-        deadline__gte=one_hour_ago
-    )
+    # 1. 只获取开启了全局报告通知的配置
+    from .models import NotificationConfig, Assignment
+    configs = NotificationConfig.objects.filter(enable_report=True).select_related('teacher')
 
-    for assignment in pending_assignments:
+    for config in configs:
+        # 2. 计算该老师的触发时间窗口
+        # 触发逻辑：当前时间 >= (截止时间 - 老师设置的小时数)
+        # 转换一下：截止时间 <= (当前时间 + 老师设置的小时数)
+        trigger_limit = now + timedelta(hours=config.remind_before_hours)
+
+        # 3. 找出该老师名下：已到达触发时间、且尚未发送报告的作业
+        pending_assignments = Assignment.objects.filter(
+            teacher=config.teacher,
+            report_sent=False,
+            deadline__lte=trigger_limit
+        )
+
+        for assignment in pending_assignments:
+            # 4. 立即标记为已发送，防止重复触发
+            assignment.report_sent = True
+            assignment.save(update_fields=['report_sent'])
+
+            # 5. 异步调用发送任务，传入老师定义的标题模板
+            send_assignment_deadline_report.delay(
+                assignment.id,
+                subject_template=config.subject_template
+            )
+
+
+# ---------------------------------------------------------
+# 任务 3: 生成并发送详细成绩报告邮件 (配置适配版)
+# ---------------------------------------------------------
+@shared_task
+def send_assignment_deadline_report(assignment_id, subject_template=None):
+    """
+    生成详细统计信息并发送给老师
+    Args:
+        assignment_id: 作业ID
+        subject_template: 可选，来自 NotificationConfig 的标题模板
+    """
+    try:
+        # 预加载关联数据以提升性能
+        from .models import Assignment, Submission
+        assignment = Assignment.objects.select_related('teacher', 'course').get(id=assignment_id)
         teacher = assignment.teacher
+
         if not teacher.email:
-            continue
+            print(f"跳过：老师 {teacher.username} 未设置邮箱")
+            return
 
-        students = assignment.course.students.all()
-        report_lines = [f"作业：{assignment.title}", f"截止时间：{assignment.deadline}", "---成绩列表---"]
+        # 1. 基础数据统计
+        all_students = assignment.course.students.all()
+        total_count = all_students.count()
 
-        for student in students:
-            submission = Submission.objects.filter(
-                student=student,
-                assignment=assignment,
-                status='completed'
-            ).order_by('-final_score').first()
+        # 获取所有已完成提交的 QuerySet
+        submitted_qs = Submission.objects.filter(assignment=assignment, status='completed')
+        submitted_student_ids = submitted_qs.values_list('student_id', flat=True).distinct()
+        submitted_count = len(submitted_student_ids)
 
-            score = submission.final_score if submission else "未提交"
-            report_lines.append(f"学生：{student.username} (学号：{student.student_id_num}) - 成绩：{score}")
+        # 2. 计算平均分 (取每个学生的最高分进行平均)
+        avg_score = submitted_qs.values('student').annotate(
+            best=Max('final_score')
+        ).aggregate(average=Avg('best'))['average'] or 0
 
-        subject = f"【自动报告】作业《{assignment.title}》成绩统计"
-        message = "\n".join(report_lines)
+        # 3. 未提交学生名单
+        unsubmitted_students = all_students.exclude(id__in=submitted_student_ids)
+        unsubmitted_list = [f"- {s.first_name or s.username} (学号: {s.student_id_num or '无'})" for s in
+                            unsubmitted_students]
+
+        # 4. 组装成绩快照文本
+        score_details = []
+        for student in all_students:
+            best_sub = submitted_qs.filter(student=student).order_by('-final_score').first()
+            score_str = f"{best_sub.final_score} 分" if best_sub else "未提交"
+            score_details.append(
+                f"{student.first_name or student.username} ({student.student_id_num or '无'}): {score_str}")
+
+        # 5. 构建邮件标题 (优先使用老师配置的模板)
+        if subject_template:
+            subject = subject_template.format(title=assignment.title)
+        else:
+            subject = f"【系统通知】作业截止统计报告：《{assignment.title}》"
+
+        unsubmitted_text = "\n".join(unsubmitted_list) if unsubmitted_list else "祝贺！全员已按时提交。"
+        score_details_text = "\n".join(score_details)
+
+        message = f"""
+尊敬的 {teacher.first_name or teacher.username} 老师：
+
+您在课程《{assignment.course.name}》中发布的作业《{assignment.title}》统计报告已生成。
+
+【作业概况】
+-----------------------------------
+- 截止时间：{assignment.deadline.strftime('%Y-%m-%d %H:%M')}
+- 班级总人数：{total_count} 人
+- 已提交人数：{submitted_count} 人
+- 提交率：{(submitted_count / total_count * 100) if total_count > 0 else 0:.1f}%
+- 全班平均分（最高分平均）：{avg_score:.2f}
+
+【未提交名单 ({total_count - submitted_count}人)】
+-----------------------------------
+{unsubmitted_text}
+
+【详细成绩快照】
+-----------------------------------
+{score_details_text}
+
+请登录系统进入“评分工作区”查看具体代码。
+
+---
+本邮件根据您的系统全局配置自动生成。
+生成时间：{timezone.now().strftime('%Y-%m-%d %H:%M:%S')}
+        """
 
         send_mail(
             subject,
@@ -85,4 +176,10 @@ def check_deadlines_and_send_reports():
             [teacher.email],
             fail_silently=False,
         )
-        print(f"已向 {teacher.username} 发送作业 {assignment.title} 的成绩报告")
+
+        print(f"成功发送全局配置报告：作业 {assignment.title} -> {teacher.email}")
+
+    except Assignment.DoesNotExist:
+        print(f"错误：找不到作业 ID {assignment_id}")
+    except Exception as e:
+        print(f"🚨 发送邮件失败: {str(e)}")

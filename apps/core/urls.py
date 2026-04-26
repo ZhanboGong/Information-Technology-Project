@@ -18,7 +18,7 @@ from .views import (
     AdminDashboardStatsView,
     AdminUserManagementViewSet,
     SystemMonitorView,
-    AdminSystemLogView
+    AdminSystemLogView, NotificationConfigViewSet
 )
 from rest_framework_simplejwt.views import TokenRefreshView
 
@@ -50,6 +50,8 @@ router.register(r'knowledge-points', KnowledgePointViewSet, basename='knowledge-
 router.register(r'admin/system-config', SystemConfigViewSet, basename='admin-config')
 
 router.register(r'admin/users', AdminUserManagementViewSet, basename='admin-users')
+
+router.register(r'notification-config', NotificationConfigViewSet, basename='notification-config')
 
 # define the final list of URL mappings
 urlpatterns = [

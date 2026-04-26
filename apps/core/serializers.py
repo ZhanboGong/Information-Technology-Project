@@ -1,6 +1,6 @@
 import json
 from rest_framework import serializers
-from .models import User, Assignment, Submission, Course, AIEvaluation, KnowledgePoint, DockerReport, SystemConfiguration
+from .models import User, Assignment, Submission, Course, AIEvaluation, KnowledgePoint, DockerReport, SystemConfiguration, Appeal, NotificationConfig
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 
@@ -50,18 +50,33 @@ class KnowledgePointSerializer(serializers.ModelSerializer):
 
 # --- 4. The course serializer ---
 class CourseSerializer(serializers.ModelSerializer):
-    """
-    Course data serializer.
-    The reverse statistics function is integrated to show how active the course is.
-    """
     student_count = serializers.IntegerField(source='students.count', read_only=True)
     teacher_name = serializers.ReadOnlyField(source='teacher.username')
-    teacher = serializers.HiddenField(default=serializers.CurrentUserDefault())
+
+    # 稍微调整：去掉定义层级的 default，改在逻辑层处理或由 ViewSet 处理
+    teacher = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.filter(role='teacher'),
+        required=False,  # 允许不传（由 ViewSet 自动补全）
+        allow_null=True
+    )
 
     class Meta:
         model = Course
-        fields = ['id', 'name', 'description', 'teacher', 'teacher_name', 'student_count', 'created_at', 'invite_code']
+        fields = [
+            'id', 'name', 'description', 'teacher', 'teacher_name',
+            'student_count', 'created_at', 'invite_code'
+        ]
         read_only_fields = ['id', 'created_at', 'invite_code']
+
+    def __init__(self, *args, **kwargs):
+        super(CourseSerializer, self).__init__(*args, **kwargs)
+        request = self.context.get('request')
+
+        # 🚀 动态权限控制：
+        # 普通老师（非 admin）在编辑和查看时，teacher 字段均设为只读
+        if request and request.user:
+            if request.user.role != 'admin':
+                self.fields['teacher'].read_only = True
 
 
 # --- 5. Assessment serializer ---
@@ -100,9 +115,50 @@ class AssignmentSerializer(serializers.ModelSerializer):
         return None
 
 
+# --- 9. Appeal Serializer ---
+class AppealSerializer(serializers.ModelSerializer):
+    """
+    申诉详情序列化器 - 加强版
+    增加了跨表字段，确保老师端和学生端都能看到完整的上下文
+    """
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+
+    # 🚀 新增：跨表获取关联信息
+    student_name = serializers.ReadOnlyField(source='evaluation.submission.student.username')
+    student_id_num = serializers.ReadOnlyField(source='evaluation.submission.student.student_id_num')
+    assignment_title = serializers.ReadOnlyField(source='evaluation.submission.assignment.title')
+    original_score = serializers.ReadOnlyField(source='evaluation.total_score')
+
+    # 🚀 新增：老师信息（用于权限验证和显示）
+    teacher_id = serializers.ReadOnlyField(source='evaluation.submission.assignment.teacher.id')
+    teacher_name = serializers.ReadOnlyField(source='evaluation.submission.assignment.teacher.username')
+
+    class Meta:
+        model = Appeal
+        fields = [
+            'id',
+            'student_name',
+            'student_id_num',
+            'assignment_title',
+            'original_score',
+            'student_reason',
+            'ai_judgment',
+            'status',
+            'status_display',
+            'teacher_id',
+            'teacher_name',
+            'teacher_remark',
+            'adjusted_score',
+            'created_at',
+            'updated_at'
+        ]
+        read_only_fields = ['id', 'ai_judgment', 'status', 'created_at', 'updated_at']
+
+
 # --- 6. AI evaluation result serializer ---
 class AIEvaluationSimpleSerializer(serializers.ModelSerializer):
     ai_raw_feedback_data = serializers.SerializerMethodField()
+    appeal = AppealSerializer(read_only=True)
 
     class Meta:
         model = AIEvaluation
@@ -118,6 +174,7 @@ class AIEvaluationSimpleSerializer(serializers.ModelSerializer):
             'ai_raw_feedback',
             'ai_raw_feedback_data',
             'raw_sandbox_output',
+            'appeal',
             'created_at'
         ]
 
@@ -158,6 +215,10 @@ class SubmissionSerializer(serializers.ModelSerializer):
 
     ai_score = serializers.SerializerMethodField()
 
+    has_appeal = serializers.SerializerMethodField()
+
+    active_appeal_data = serializers.SerializerMethodField()
+
     class Meta:
         model = Submission
         fields = [
@@ -174,6 +235,8 @@ class SubmissionSerializer(serializers.ModelSerializer):
             'final_score',
             'ai_score',
             'created_at',
+            'has_appeal',
+            'active_appeal_data',
             'attempt_number'
         ]
         read_only_fields = ['student', 'status', 'final_score', 'sub_type', 'attempt_number']
@@ -193,6 +256,33 @@ class SubmissionSerializer(serializers.ModelSerializer):
             return obj.ai_evaluation.total_score
         except:
             return 0
+
+    def get_has_appeal(self, obj):
+        """
+        🚀 逻辑升级：
+        只要该学生对该作业的【任何一次】提交发起了申诉，该字段都返回 True。
+        """
+        return Appeal.objects.filter(
+            evaluation__submission__assignment=obj.assignment,
+            evaluation__submission__student=obj.student
+        ).exists()
+
+    def get_active_appeal_data(self, obj):
+        """
+        🚀 逻辑同步：
+        获取该作业下唯一的申诉记录。
+        这样即使是在没有发起申诉的 Submission 页面，前端也能拿到申诉进度。
+        """
+        # 找到该作业关联的最新申诉记录
+        appeal = Appeal.objects.filter(
+            evaluation__submission__assignment=obj.assignment,
+            evaluation__submission__student=obj.student
+        ).first()
+
+        if appeal:
+            # 动态调用我们之前定义的 AppealSerializer
+            return AppealSerializer(appeal).data
+        return None
 
 
 class UserProfileSerializer(serializers.ModelSerializer):
@@ -243,3 +333,11 @@ class SystemConfigurationSerializer(serializers.ModelSerializer):
     class Meta:
         model = SystemConfiguration
         fields = ['deepseek_api_key', 'deepseek_base_url', 'deepseek_model_name']
+
+
+class NotificationConfigSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = NotificationConfig
+        fields = ['enable_report', 'remind_before_hours', 'subject_template']
+        read_only_fields = ['teacher']# 老师字段由后端自动绑定，不允许前端修改
+

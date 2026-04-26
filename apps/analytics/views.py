@@ -1,10 +1,20 @@
 import json
+import re
 import traceback
 from django.db.models import Avg
 from rest_framework import viewsets, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from apps.core.models import Course, Assignment, Submission, AIEvaluation, KnowledgePoint
+from django.http import HttpResponse
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
+from apps.core.utils.ai_scorer import AIScorer
 
 
 class AnalyticsViewSet(viewsets.ViewSet):
@@ -157,3 +167,62 @@ class AnalyticsViewSet(viewsets.ViewSet):
                 "average_score": round(float(evals.aggregate(avg=Avg('total_score'))['avg'] or 0), 1)
             }
         })
+
+    @action(detail=False, methods=['post'], url_path='get-study-resource')
+    def get_study_resource(self, request):
+        """
+        AI 智能导学：根据学生薄弱的知识点生成学习链接和建议。
+        逻辑：
+        1. 获取前端传来的 kp_name。
+        2. 调用 AIScorer (利用其动态配置属性)。
+        3. 提示 AI 返回结构化的 JSON，包含资源链接和核心建议。
+        """
+        kp_name = request.data.get('kp_name')
+        if not kp_name:
+            return Response({"error": "Knowledge point name is required"}, status=400)
+
+
+        scorer = AIScorer()
+
+        # 构建针对性 Prompt
+        prompt = f"""
+            The student is struggling with the programming concept: "{kp_name}".
+            As an expert tutor, provide a high-quality online resource for them to learn this.
+
+            Requirements:
+            1. The URL should be a reputable technical site (e.g., MDN, RealPython, GeeksforGeeks, or official docs).
+            2. Provide a "study_tip" which is a one-sentence actionable advice for this specific topic.
+
+            Output ONLY a valid JSON object:
+            {{
+                "url": "https://...",
+                "study_tip": "Focus on understanding how..."
+            }}
+            """
+
+        try:
+            # 使用 AIScorer 的 ask 接口
+            raw_response = scorer.ask(prompt)
+
+            # 清洗并解析 JSON
+            # 兼容 AI 可能返回的 Markdown 代码块格式
+            clean_json = re.sub(r'```json\s*|\s*```', '', raw_response).strip()
+            data = json.loads(clean_json)
+
+            return Response({
+                "kp_name": kp_name,
+                "url": data.get('url'),
+                "study_tip": data.get('study_tip', "Keep practicing to master this concept!")
+            })
+
+        except Exception as e:
+            # 兜底逻辑：如果 AI 请求失败，返回基础搜索链接
+            fallback_url = f"https://www.google.com/search?q={kp_name}+programming+tutorial"
+            return Response({
+                "kp_name": kp_name,
+                "url": fallback_url,
+                "study_tip": "Try searching for specific tutorials and building small projects."
+            })
+
+
+
