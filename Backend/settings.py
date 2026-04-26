@@ -200,8 +200,6 @@ EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST = 'smtp.qq.com'  # 发件服务器地址
 EMAIL_PORT = 465
 EMAIL_USE_SSL = True
-EMAIL_HOST_USER = '3148556817@qq.com'  # 邮箱地址
-EMAIL_HOST_PASSWORD = 'nxqznjihpwohdcfc'      # 邮箱授权码，非登录密码
 DEFAULT_FROM_EMAIL = f"AI Grading System <{EMAIL_HOST_USER}>"
 
 from celery.schedules import crontab
