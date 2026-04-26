@@ -244,8 +244,7 @@ class AIScorer:
         """
         assignment = submission.assignment
 
-        # 🚀 核心修复：不再进行大范围的 filter 搜索
-        # 而是直接获取老师为这个具体作业勾选的 Knowledge Points 关联记录
+        # 直接获取老师为这个具体作业勾选的 Knowledge Points 关联记录
         assigned_kps = assignment.knowledge_points.all()
 
         l1, l2, allowed = "", "", []

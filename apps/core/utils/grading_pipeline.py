@@ -75,11 +75,11 @@ class GradingPipeline:
         target_file = None
         valid_extensions = ('.py', '.java')
 
-        # 🚀 调试日志：核对传入参数
+        # 调试日志：核对传入参数
         print(f"DEBUG | Received Params - entry_point: {entry_point}, work_dir: {work_dir}")
 
         if work_dir and os.path.exists(work_dir):
-            # 🚀 诊断日志：强制列出解压目录下的所有文件结构，排查解压是否成功
+            # 诊断日志：强制列出解压目录下的所有文件结构，排查解压是否成功
             print(f"🔍 Listing files in work_dir ({work_dir}):")
             for root, dirs, files in os.walk(work_dir):
                 print(f"   Directory: {root}")
@@ -106,7 +106,6 @@ class GradingPipeline:
                             break
                     if target_file: break
 
-        # 🚀 修复逻辑：最后的兜底回退
         if not target_file:
             target_file = self.submission.file.path
             print(f"ℹ️ No source file found in work_dir. Falling back to submission path: {target_file}")
