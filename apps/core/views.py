@@ -2321,6 +2321,13 @@ class AdminSystemLogView(APIView):
 
 
 class NotificationConfigViewSet(viewsets.ModelViewSet):
+    """
+    Notify the configuration management view set.
+    Responsibilities:
+    1. Preference store: Manage the teacher's personalized Settings for homework reminders, system notifications, etc. (e.g., reminders a few hours in advance).
+    2. Autocompletion: The 'get_or_create' mechanism ensures that each teacher has a set of default Settings when they enter the system.
+    3. Semantic routing: Provides a '/me/' interface that allows the frontend to operate on the current user's configuration without having to care about the specific configuration ID.
+    """
     queryset = NotificationConfig.objects.all()
     serializer_class = NotificationConfigSerializer
     permission_classes = [IsAuthenticated]
@@ -2328,14 +2335,15 @@ class NotificationConfigViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get', 'put', 'patch'], url_path='me')
     def manage_my_config(self, request):
         """
-        专门处理 /api/notification-config/me/
-        GET: 获取当前老师的配置
-        PUT/PATCH: 更新当前老师的配置
+        Specifically deals with the personal notification configuration of the currently logged-in teacher.
+        1. Automatic association: The interface will automatically lock configuration records against 'request.user' to prevent overreach.
+        2. Lazy loading creation: If the current teacher is visiting the configuration page for the first time, the system will automatically create a default configuration for it.
+        3. Idempotent update: Supports both PUT (full) and PATCH (incremental) update modes.
         """
-        # 获取或创建当前老师的配置
+        # Gets or creates a configuration for the current teacher
         config, created = NotificationConfig.objects.get_or_create(
             teacher=request.user,
-            defaults={'remind_before_hours': 0} # 如果是老用户没有配置，自动补齐
+            defaults={'remind_before_hours': 0}
         )
 
         if request.method == 'GET':
@@ -2343,7 +2351,7 @@ class NotificationConfigViewSet(viewsets.ModelViewSet):
             return Response(serializer.data)
 
         elif request.method in ['PUT', 'PATCH']:
-            # 部分更新或全部更新
+            # Partially or completely updated
             serializer = self.get_serializer(config, data=request.data, partial=True)
             if serializer.is_valid():
                 serializer.save()
