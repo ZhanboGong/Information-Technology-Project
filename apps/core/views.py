@@ -1090,25 +1090,22 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'], url_path='all-appeals')
     def get_all_appeals(self, request):
         """
-        老师查看名下所有作业的申诉记录。
-
-        功能亮点：
-        1. 数据隔离：仅返回当前老师发布的作业相关的申诉。
-        2. 性能优化：使用 select_related 一次性抓取学生、作业和评价信息，避免 N+1 查询。
-        3. 决策支持：直接透出 ai_judgment 和 status，方便老师快速筛选 AI 建议驳回的记录。
+        The teacher checks the record of the grade appeal of all the assignments under his name.
+        When students have objections to the AI scoring results and submit appeals, the interface provides a unified review workbench for teachers.
+        :return: A flat list of complaint records.
         """
         from .models import Appeal
 
-        # 1. 过滤逻辑：找到所有属于当前老师的作业的申诉
+        # 1. Filtering logic: Find all appeals for assignments belonging to the current teacher
         appeals = Appeal.objects.filter(
             evaluation__submission__assignment__teacher=request.user
         ).select_related(
             'evaluation__submission__student',
             'evaluation__submission__assignment',
             'evaluation'
-        ).order_by('-created_at')  # 按时间倒序，优先处理最新的申诉
+        ).order_by('-created_at')
 
-        # 2. 构造返回数据
+        # 2. Constructing return data
         data = []
         for a in appeals:
             sub = a.evaluation.submission
@@ -1116,7 +1113,6 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
                 "id": a.id,
                 "submission_id": sub.id,
                 "assignment_title": sub.assignment.title,
-                # 🚀 直接平铺学生信息，方便前端直接 {{ appeal.student_name }} 读取
                 "student_name": sub.student.first_name or sub.student.username,
                 "student_id_num": sub.student.student_id_num,
                 "class_name": sub.student.class_name,
