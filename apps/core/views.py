@@ -925,6 +925,17 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'], url_path='export-all-pdf-reports')
     def export_all_pdf_reports(self, request, pk=None):
+        """
+        The PDF report of the highest score of the whole class is exported in bulk packaging.
+        The interface implements complex many-to-one resource aggregation and format conversion:
+        1. Intelligent deduplication: In all submitted records, SQL sorting and memory filtering are used to ensure that each student only exports the "representative work" with the highest score.
+        Parallel stream processing: The ReportLab document stream is built independently for each student in the loop, and dynamic Rubric coloring is supported.
+        3. Memory ZIP: Use 'zipfile.writestr' to write the resulting PDF binary stream directly to the memory zip package.
+        It avoids the disk pressure and cleaning problem caused by a large number of temporary files on the server.
+        4. Naming normalization: The automatically generated PDF file name contains the student number and name, and the compressed package name contains the assignment title.
+        :param pk: The ID of the Assignment.
+        :return:
+        """
         import io, json, re, zipfile
         from django.http import HttpResponse
         from django.utils.encoding import escape_uri_path
@@ -935,12 +946,12 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
         assignment = self.get_object()
 
-        # 1. 参考 download_all_submissions 的筛选逻辑：获取每个学生最高分的提交
+        # 1. Get the submission with the highest score from each student
         all_subs = Submission.objects.filter(assignment=assignment, status='completed').order_by(
             'student', '-final_score', '-ai_evaluation__total_score', '-id'
         ).select_related('student', 'ai_evaluation')
 
-        # 内存去重，确保每个人只有一份最好的成绩单
+        # Memory deduplication ensures that each person has only one copy of the best report card
         best_submissions = []
         seen_students = set()
         for s in all_subs:
@@ -951,7 +962,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         if not best_submissions:
             return Response({"error": "No completed submissions found to export"}, status=404)
 
-        # 2. 初始化 ZIP 内存流 (完全参照你成功的代码)
+        # 2. Initialize the ZIP memory stream
         byte_io = io.BytesIO()
 
         def sanitize_key(text):
@@ -964,14 +975,13 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
                     continue
 
                 try:
-                    # --- 为每个学生生成 PDF 字节流 ---
                     pdf_buffer = io.BytesIO()
                     doc = SimpleDocTemplate(pdf_buffer, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30,
                                             bottomMargin=30)
                     elements = []
                     styles = getSampleStyleSheet()
 
-                    # 头部信息
+                    # Header information
                     elements.append(Paragraph(f"<b>Performance Report: {assignment.title}</b>", styles['Title']))
                     elements.append(Paragraph(
                         f"Student: {sub.student.first_name or sub.student.username} ({sub.student.student_id_num})",
@@ -981,7 +991,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
                         styles['Normal']))
                     elements.append(Spacer(1, 20))
 
-                    # 解析分数 (增强解析逻辑)
+                    # Parsing score
                     student_scores_data = {}
                     if evaluation.ai_raw_feedback:
                         try:
@@ -995,7 +1005,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
                     this_clean_map = {sanitize_key(k): v for k, v in student_scores_data.items()}
 
-                    # 构建 Rubric 矩阵
+                    # Construct the Rubric matrix
                     level_map = [
                         {"label": "High Distinction", "match": "highdistinction"},
                         {"label": "Distinction", "match": "distinction"},
@@ -1020,7 +1030,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
                             row.append(Paragraph(desc_text, styles['BodyText']))
                         table_data.append(row)
 
-                    # 样式与染色 (关键：每次循环重置)
+                    # Styles and Coloring
                     this_t_style = [
                         ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
                         ('BACKGROUND', (0, 0), (-1, 0), colors.whitesmoke),
@@ -1057,11 +1067,11 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
                                             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold')]))
                     elements.append(bt)
 
-                    # 生成 PDF 二进制流
+                    # Generate a PDF binary stream
                     doc.build(elements)
                     pdf_content = pdf_buffer.getvalue()
 
-                    # 写入 ZIP (参考你的 arc_name 命名规则)
+                    # Write ZIP
                     arc_name = f"{sub.student.student_id_num}_{sub.student.username}_Report.pdf"
                     zip_file.writestr(arc_name, pdf_content)
 
@@ -1069,12 +1079,11 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
                     print(f"FAILED TO GENERATE PDF for {sub.student.student_id_num}: {e}")
                     continue
 
-        # 3. 构造响应 (完全参考你成功的代码结构)
+        # 3. Constructing the response
         byte_io.seek(0)
         zip_filename = f"PDF_Reports_{assignment.title}.zip"
 
         response = HttpResponse(byte_io, content_type='application/zip')
-        # 必须使用 escape_uri_path 处理中文文件名
         response['Content-Disposition'] = f"attachment; filename*=utf-8''{escape_uri_path(zip_filename)}"
         return response
 
