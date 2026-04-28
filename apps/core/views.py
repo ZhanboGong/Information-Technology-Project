@@ -1132,43 +1132,51 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], url_path='resolve-appeal')
     def resolve_appeal(self, request, pk=None):
         """
-        老师处理申诉：决定最终分数并结案
+        Teacher adjudicating appeal: Perform final grading and close the case.
+        1. Arbitration intervention: The teacher decides whether to adjust the score according to the reason of the student's appeal and the AI initial review proposal.
+        2. Penetrating synchronization (Crucial) :
+            - If score adjustment: synchronously modify 'total_score' in the 'AIEvaluation' record and mark it as reviewed.
+            - Synchronize transcripts: Update the 'final_score' in the 'Submission' table in real time to ensure that the latest score is displayed in the student's personal center.
+        3. Status loop closure: Set the appeal status to 'completed' and restore the submission status from 'appealing' to 'completed'.
+        4. Transaction protection: Ensure that all three database operations of score transfer, status change, and score synchronization are either successful or reversed.
+        :param request: The primary key ID of the Appeal.
+        :param pk: A request body containing adjusted_score (optional) and teacher_remark (required).
+        :return:
         """
         from .models import Appeal
-        # 1. 获取申诉记录
+        # 1. Obtaining grievance records
         appeal = get_object_or_404(Appeal, id=pk)
 
-        # 2. 获取参数
-        new_score = request.data.get('adjusted_score')  # 老师输入的新分数
-        teacher_remark = request.data.get('teacher_remark')  # 老师的审核评语
+        # 2. Getting parameters
+        new_score = request.data.get('adjusted_score')
+        teacher_remark = request.data.get('teacher_remark')
 
         with transaction.atomic():
-            # 3. 如果老师给出了新分数，直接覆盖 AI 的评分记录 (响应你的问题三逻辑)
+            # 3. If the teacher gives a new grade, directly overwrite the AI's grading record
             if new_score is not None:
                 evaluation = appeal.evaluation
                 evaluation.total_score = new_score
                 evaluation.teacher_reviewed = True
                 evaluation.save()
 
-                # 4. 同步更新 Submission 表的 final_score (确保成绩单显示最新最高分)
+                # 4. Update the final_score of the Submission table synchronously
                 submission = evaluation.submission
                 submission.final_score = new_score
                 submission.save()
 
                 appeal.adjusted_score = new_score
 
-            # 5. 更新申诉单状态
+            # 5. Update the claim sheet status
             appeal.status = 'completed'
             appeal.teacher_remark = teacher_remark
             appeal.save()
 
-            # 6. 将提交记录的状态从 appealing 恢复为已完成
-            # 这样学生在前端看到的状态就会变回正常的“已完成”
+            # 6. Restores the status of the commit record from appealing to completed
             sub = appeal.evaluation.submission
             sub.status = 'completed'
             sub.save()
 
-        return Response({"message": "申诉处理成功，分数已同步更新"})
+        return Response({"message": "The appeal was processed successfully and the score was updated synchronously"})
 
     @action(detail=True, methods=['get'], url_path='teaching-insights')
     def get_teaching_insights(self, request, pk=None):
