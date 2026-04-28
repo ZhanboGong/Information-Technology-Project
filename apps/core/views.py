@@ -1181,11 +1181,16 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'], url_path='teaching-insights')
     def get_teaching_insights(self, request, pk=None):
         """
-        AI 教学洞察：基于全班最高分表现，生成教学干预建议。
+        AI Teaching Insights: Generating Learning Diagnoses and Teaching Recommendations Based on Overall Class Performance.
+        1. Statistical modeling: The "historical best performance" of each student is obtained by memory deduplication, and the real ability benchmark of the class is constructed.
+        2. Dimension mining: Deeply analyze the kp_scores of all AI evaluations in the class, and calculate the average mastery of each dimension.
+        3. Semantic analysis: extract summaries of student feedback and identify group logical blind spots or code style problems.
+        4. AI professor diagnosis: The summary indicators are fed into the big model to simulate the expert perspective and output a structured report containing "performance summary, strengths, weaknesses, intervention recommendations".
+        :return: JSON data with class statistics and AI insights
         """
         assignment = self.get_object()
 
-        # 1. 🚀 获取每个学生/小组的最高分提交记录 (内存去重逻辑)
+        # 1. Get the highest score commit for each student/group (memory deduplication logic)
         all_subs = Submission.objects.filter(
             assignment=assignment,
             status='completed'
@@ -1195,15 +1200,14 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         seen_students = set()
         for s in all_subs:
             if s.student_id not in seen_students:
-                # 只有带有 AI 评价记录的才纳入统计，防止异常
                 if hasattr(s, 'ai_evaluation'):
                     best_submissions.append(s)
                     seen_students.add(s.student_id)
 
         if not best_submissions:
-            return Response({"error": "暂无已评分的提交数据，无法生成分析报告。"}, status=400)
+            return Response({"error": "No submitted data has been scored yet, and the analysis report cannot be generated."}, status=400)
 
-        # 2. 📊 聚合统计知识点得分与反馈摘要
+        # 2. Aggregate statistical knowledge point scores and feedback summaries
         kp_stats = {}
         common_issues = []
         total_score_sum = 0
@@ -1212,7 +1216,6 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
             total_score_sum += float(sub.final_score or 0)
             evaluation = sub.ai_evaluation
 
-            # 安全提取 kp_scores
             if evaluation.kp_scores and isinstance(evaluation.kp_scores, dict):
                 for kp_name, score in evaluation.kp_scores.items():
                     if kp_name not in kp_stats:
@@ -1222,12 +1225,12 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
                     except (ValueError, TypeError):
                         continue
 
-            # 收集反馈摘要用于 AI 分析上下文
+            # Feedback summaries are collected for use in the AI analysis context
             if evaluation.feedback:
-                common_issues.append(evaluation.feedback[:80])  # 每人取80字摘要
+                common_issues.append(evaluation.feedback[:80])
 
         if not kp_stats:
-            return Response({"error": "现有提交中缺少详细的知识点得分明细。"}, status=400)
+            return Response({"error": "Detailed knowledge point score details are missing in the existing submissions."}, status=400)
 
         # 3. 📉 计算汇总指标
         kp_summary = [f"- {name}: 平均 {round(sum(v) / len(v), 1)}分" for name, v in kp_stats.items()]
@@ -1259,10 +1262,8 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
             """
 
         try:
-            # 使用我们之前优化过的 ask 方法
             raw_res = scorer.ask(prompt)
 
-            # 彻底清洗可能存在的 Markdown 标签
             import re
             import json
             clean_json = re.sub(r'```json\s?|\s?```', '', raw_res).strip()
@@ -1278,7 +1279,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
             })
         except Exception as e:
             print(f"DEBUG TEACHING INSIGHTS ERROR: {str(e)}")
-            return Response({"error": "AI 分析引擎暂时无法响应，请稍后再试。"}, status=500)
+            return Response({"error": "The AI analytics engine is temporarily unable to respond, please try again later."}, status=500)
 
 
 class KnowledgePointViewSet(viewsets.ModelViewSet):
