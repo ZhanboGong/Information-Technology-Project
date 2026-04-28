@@ -2033,6 +2033,14 @@ class SystemConfigViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=['post'], url_path='test-connection')
     def test_connection(self, request):
+        """
+        AI engine connectivity and account limit diagnostics.
+        1. Connectivity test: Call '/models' to make sure the API Key and Base URL are valid.
+        2. Model awareness: Automatically pull the list of models currently supported by the vendor (show the top 3 items) to ensure that the model is configured correctly.
+        3. Error-tolerant adaptation: Automatically clean the trailing slash of URls to prevent 404 errors due to improper formatting.
+        :param request: Contains configuration data for deepseek_api_key and deepseek_base_url.
+        :return: List of connectivity, balance information, and models.
+        """
         import requests
         config_data = request.data
         api_key = config_data.get('deepseek_api_key')
@@ -2041,10 +2049,10 @@ class SystemConfigViewSet(viewsets.ViewSet):
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
         try:
-            # 1. 测试模型可用性
+            # 1. Test model usability
             models_res = requests.get(f"{base_url}/models", headers=headers, timeout=10)
 
-            # 2. 尝试获取余额 (适配大多数中转商路径)
+            # 2. Trying to get the balance
             clean_url = base_url.replace('/v1', '')
             balance_res = requests.get(f"{clean_url}/dashboard/billing/subscription", headers=headers, timeout=10)
 
@@ -2059,7 +2067,7 @@ class SystemConfigViewSet(viewsets.ViewSet):
                 return Response({
                     "status": "success",
                     "balance": balance_data,
-                    "models": [m.get('id') for m in models_res.json().get('data', [])[:3]]  # 取前3个
+                    "models": [m.get('id') for m in models_res.json().get('data', [])[:3]]
                 })
             return Response({"message": "Invalid Key or URL"}, status=400)
         except Exception as e:
