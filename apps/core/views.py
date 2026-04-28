@@ -1733,7 +1733,12 @@ class StudentCourseViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=['post'], url_path='join-by-code')
     def join_by_code(self, request):
         """
-        学生通过邀请码主动加入课程
+        Students actively join the course through the course invitation code.
+        1. Format Standardization: Remove whitespace from the input invitation code and convert it to uppercase to ensure a robust validation.
+        2. Uniqueness search: Find the active course in the course schedule that matches the 'invite_code'.
+        3. Membership check: Check whether the current requested user (Student) is already in the course list to avoid duplicate records.
+        4. Association persistence: Use Django ManyToMany's '.add() 'method to add the student to' course.students'.
+        :return: Contains information on joining success and basic course data
         """
         code = request.data.get('invite_code', '').strip().upper()
 
@@ -1741,15 +1746,15 @@ class StudentCourseViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({"error": "Please enter an invitation code"}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            # 1. 查找课程
+            # 1. Finding a Course
             course = Course.objects.get(invite_code=code)
 
-            # 2. 检查该学生是否已经是该课程的成员
+            # 2. Check if the student is already a member of the course
             if course.students.filter(id=request.user.id).exists():
                 return Response({"error": f"You are already a member of '{course.name}'"},
                                 status=status.HTTP_400_BAD_REQUEST)
 
-            # 3. 将学生添加进课程的 ManyToMany 字段
+            # 3. Add the student to the ManyToMany field of the course
             course.students.add(request.user)
 
             return Response({
