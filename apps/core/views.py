@@ -3,10 +3,12 @@ import os
 import zipfile
 import io
 import uuid
+import docker
 import shutil
 import pandas as pd
 import requests
 import traceback
+
 from apps.analytics.models import AIServiceLog
 from django.conf import settings
 from django.db import transaction
@@ -33,13 +35,14 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 # Import the model and serializer
-from .models import User, Course, Assignment, Submission, AIEvaluation, KnowledgePoint, SystemConfiguration, NotificationConfig
+from .models import (User, Course, Assignment, Submission, AIEvaluation, KnowledgePoint, SystemConfiguration,
+                     NotificationConfig, Group)
 from .serializers import (
     AssignmentSerializer,
     SubmissionSerializer,
     MyTokenObtainPairSerializer,
     CourseSerializer, KnowledgePointSerializer, UserProfileSerializer, ChangePasswordSerializer, SystemConfigurationSerializer,
-    NotificationConfigSerializer
+    NotificationConfigSerializer, GroupSerializer
 )
 from .utils.ai_scorer import AIScorer
 from .utils.project_analyzer import ProjectAnalyzer
@@ -48,132 +51,125 @@ from .utils.project_analyzer import ProjectAnalyzer
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def export_assignment_grades(request, assignment_id):
-    """
-    Export all student grades of the specified assignment to Excel.
-    This interface has a "dynamic column" generation logic, which can automatically adjust the table headers according to the Rubric dimensions specified in the job configuration.
-    Business Logic:
-    1. Permission Check: Only the instructors of this course or system administrators are allowed to export.
-    2. Dynamic Column Headers: Extract the knowledge points (KnowledgePoint) associated with the assignment as an additional scoring column in Excel.
-    3. Data Cleaning:
-        - Automatically obtain the highest score submission record for each student (Submission).
-        - Parse the JSON breakdown scores stored in AIEvaluation.ai_raw_feedback.
-        - Handle edge cases such as no submission, parsing failure, etc.
-    4. Formatting Output: Use Pandas to construct a DataFrame and use the openpyxl engine to generate an .xlsx file stream.
-    :param request: DRF Request Object.
-    :param assignment_id: The ID of the target assignment
-    :return: Binary Excel file stream.
-    """
-    # 1. Obtain the assignment and verify the identity (Only the teacher of this assignment can export it)
     assignment = get_object_or_404(Assignment, id=assignment_id)
     if request.user != assignment.teacher and not request.user.is_staff:
         return HttpResponse("You do not have the permission to export this transcript.", status=403)
 
-    # 2. Obtain all the knowledge points (as dynamic column names in Excel) set for this assignment
     kp_list = assignment.knowledge_points.all()
     rubric_names = [kp.name for kp in kp_list]
 
-    # 3. Prepare data container
     data = []
-    # Obtain all the students who have chosen this course
     students = assignment.course.students.all()
 
     for student in students:
-        # Obtain the submission record of this student's highest score for this assignment
-        submission = Submission.objects.filter(
-            student=student,
-            assignment=assignment,
-            status='completed'
-        ).order_by('-final_score').first()
+        submission = None
+        group_display = "个人作业"
+
+        if assignment.is_group:
+            user_group = Group.objects.filter(course=assignment.course, members=student).first()
+            if user_group:
+                group_display = user_group.name
+                submission = Submission.objects.filter(
+                    group=user_group,
+                    assignment=assignment,
+                    status='completed'
+                ).order_by('-final_score').first()
+            else:
+                group_display = "未组队"
+
+        else:
+            submission = Submission.objects.filter(
+                student=student,
+                assignment=assignment,
+                status='completed'
+            ).order_by('-final_score').first()
 
         row = {
             "学号": student.student_id_num or "无",
             "姓名": student.username,
             "班级": student.class_name or "无",
+            "小组": group_display,  # 🚀 修正：更清晰的状态展示
             "总分": submission.final_score if submission else "未提交"
         }
 
-        # 4. Fill in the Rubric and break down the scores
         if submission:
-            # Obtain the corresponding AI scoring record
             evaluation = AIEvaluation.objects.filter(submission=submission).first()
             scores_dict = {}
 
             if evaluation and evaluation.ai_raw_feedback:
                 try:
-                    # Attempt to parse the JSON stored in ai_raw_feedback
-                    raw_json = json.loads(evaluation.ai_raw_feedback)
+                    # 🚀 增加：清洗 AI 可能带出的 Markdown 标签
+                    import re
+                    clean_str = re.sub(r'```json|```', '', evaluation.ai_raw_feedback).strip()
+                    raw_json = json.loads(clean_str)
                     scores_dict = raw_json.get('scores', raw_json)
-                except json.JSONDecodeError:
+                except:
                     scores_dict = {}
 
-            # Traverse the knowledge points set by the teacher and find the corresponding scores from the JSON.
             for kp_name in rubric_names:
-                row[kp_name] = scores_dict.get(kp_name, "Parsing failed")
+                row[kp_name] = scores_dict.get(kp_name, 0)
         else:
-            # Set all dimensions to 0 or "/" when not committed.
             for kp_name in rubric_names:
                 row[kp_name] = "/"
 
         data.append(row)
 
-    # 5. Convert to DataFrame and export to Excel
     df = pd.DataFrame(data)
 
-    # Adjust column order: Student number, name, class, total score, dimension 1, dimension 2...
-    columns = ["学号", "姓名", "班级", "总分"] + rubric_names
+    # 🚀 修正：将 "小组" 加入到列排序中
+    columns = ["学号", "姓名", "班级", "小组", "总分"] + rubric_names
     df = df.reindex(columns=columns)
 
-    # 6. Construct the HttpResponse
     filename = f"Grades_{assignment.title}.xlsx"
     response = HttpResponse(content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-    # Handle Chinese file names
     response['Content-Disposition'] = f'attachment; filename="{filename.encode("utf-8").decode("ISO-8859-1")}"'
 
     df.to_excel(response, index=False, engine='openpyxl')
-
     return response
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_global_assignment_reminders(request):
-    """
-    Get the assessment deadline warning on the student's dashboard page.
-
-    This interface is dedicated to the dashboard page display, and the logic is as follows:
-    1. Role filtering: Perform only for users whose role is 'student'.
-    2. Time window: Filter the assessments that are due in the next 7 days (within a week) from the current time.
-    3. Status filtering: Automatically excludes assignments that students have submitted successfully or are in process, and only keeps "to be done" tasks.
-    4. Urgency: Results are sorted in ascending order by deadline (most urgent first).
-    :param request: DRF request object, which should contain the authenticated user instance.
-    :return: A list containing alert details. If there is no reminder or the user is not a student, an empty list is returned.
-    """
     user = request.user
-    # Only the student role needs to be reminded
     if user.role != 'student':
         return Response([])
 
     now = timezone.now()
     one_week_later = now + timedelta(days=7)
 
-    # 1. Find all assignments that are due within a week for a student's chosen course
+    # 1. 获取该学生所有课程中一周内截止的作业
     upcoming_assignments = Assignment.objects.filter(
         course__students=user,
         deadline__range=(now, one_week_later)
-    ).select_related('course')  # 使用 select_related 优化查询
+    ).select_related('course')
 
     reminders = []
     for assignment in upcoming_assignments:
-        # 2. Check if the student already has a "done" or "in progress" submission for the assignment
-        has_submitted = Submission.objects.filter(
-            student=user,
-            assignment=assignment
-        ).exclude(status='failed').exists()
+        # --- 🚀 核心修改：小组感知的提交判定 ---
+        if assignment.is_group:
+            # 找到学生在当前课程所属的小组
+            user_group = Group.objects.filter(course=assignment.course, members=user).first()
+            if user_group:
+                # 只要该小组有任何“非失败”的提交，该组所有成员都不再提醒
+                has_submitted = Submission.objects.filter(
+                    group=user_group,
+                    assignment=assignment
+                ).exclude(status='failed').exists()
+            else:
+                # 要求组队但还没加入小组，必须继续提醒
+                has_submitted = False
+        else:
+            # 个人作业：保持原逻辑
+            has_submitted = Submission.objects.filter(
+                student=user,
+                assignment=assignment
+            ).exclude(status='failed').exists()
+        # --- 🚀 修改结束 ---
 
         if not has_submitted:
             time_delta = assignment.deadline - now
             days_left = time_delta.days
-
             hours_left = int(time_delta.total_seconds() // 3600)
 
             reminders.append({
@@ -183,12 +179,11 @@ def get_global_assignment_reminders(request):
                 "deadline": assignment.deadline,
                 "days_left": days_left,
                 "hours_left": hours_left,
-                "category": assignment.category
+                "category": assignment.category,
+                "is_group": assignment.is_group  # 返回此标识，方便前端显示“小组”图标
             })
 
-    # Sort by urgency (closest deadline first)
     reminders.sort(key=lambda x: x['deadline'])
-
     return Response(reminders)
 
 # Identity verification and permissions
@@ -765,6 +760,18 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='export-pdf-report')
     def export_pdf_report(self, request):
+        """
+        Export fully automatic intelligent scoring PDF report.
+        This interface is the final output of the system for students and parents, and has the following advanced features:
+        1. Dynamic Rubric matrix: Automatically generate A4 table according to the rating scale configured by the job.
+        2. Intelligent coloring algorithm: deeply parse the JSON feedback generated by AI, calculate the corresponding level of each dimension score (HD/D/C/P/F),
+        And the corresponding cells in the PDF table are automatically colored as background green to realize visual feedback.
+        3. Robust Key matching: Eliminate whitespace, line breaks, or capitalization in AI responses via the 'sanitize_key' algorithm
+        Dimension name matching failure problem.
+        4. Professional typesetting engine: built on ReportLab, containing header information, score matrix, weight description and score breakdown table
+        :param request: Need to include submission_id in query_params.
+        :return: Binary PDF file stream.
+        """
         import io
         import json
         import re
@@ -776,7 +783,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         from reportlab.lib.styles import getSampleStyleSheet
         from django.utils.encoding import escape_uri_path
 
-        # 1. 获取数据
+        # 1. Getting the data
         submission_id = request.query_params.get('submission_id')
         submission = get_object_or_404(Submission, id=submission_id)
         assignment = submission.assignment
@@ -785,39 +792,37 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         if not evaluation:
             return Response({"error": "No evaluation record found"}, status=400)
 
-        # --- 2. 核心修复：从 ai_raw_feedback 解析单项得分 ---
+        # 2. Parse individual scores from ai_raw_feedback
         rubric_items = assignment.rubric_config.get('items', [])
 
-        # 尝试解析 ai_raw_feedback 文本字段
+        # Parse the ai_raw_feedback text field
         student_scores_data = {}
         if evaluation.ai_raw_feedback:
             try:
-                # 移除可能的 Markdown 代码块标记 ```json ... ```
                 clean_json_str = re.sub(r'```json|```', '', evaluation.ai_raw_feedback).strip()
                 parsed_data = json.loads(clean_json_str)
 
-                # 兼容不同的 JSON 结构
+                # Compatible with different JSON structures
                 if isinstance(parsed_data, dict):
-                    # 优先取 scores 里的内容，如果本身就是扁平字典则取自身
                     student_scores_data = parsed_data.get('scores', parsed_data.get('kp_scores', parsed_data))
             except Exception as e:
                 print(f"JSON Parsing Error: {e}")
                 student_scores_data = {}
 
-        # 终极清洗函数：去掉所有空格、换行、特殊字符，确保 Key 能匹配上
+        # Remove all Spaces, newlines, and special characters to make sure the Key matches
         def sanitize_key(text):
             return re.sub(r'[\s\W_]+', '', str(text)).lower()
 
-        # 建立清洗后的分数字典映射 (例如: {"collectionsmanagementparts35": 78})
+        # Score after cleaning the dictionary mapping (for example: {" collectionsmanagementparts35 ": 78})
         clean_scores_map = {sanitize_key(k): v for k, v in student_scores_data.items()}
 
-        # --- 3. PDF 基础设置 ---
+        # PDF basic Settings
         buffer = io.BytesIO()
         doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
         elements = []
         styles = getSampleStyleSheet()
 
-        # 头部信息
+        # Header information
         elements.append(Paragraph(f"<b>Performance Report: {assignment.title}</b>", styles['Title']))
         elements.append(Paragraph(
             f"Student: {submission.student.first_name or submission.student.username} ({submission.student.student_id_num})",
@@ -827,7 +832,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
                       styles['Normal']))
         elements.append(Spacer(1, 20))
 
-        # --- 4. 构建 Rubric 矩阵 ---
+        # 4. Build the Rubric matrix
         level_map = [
             {"label": "High Distinction", "match": "highdistinction"},
             {"label": "Distinction", "match": "distinction"},
@@ -865,27 +870,23 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
             ('FONTSIZE', (0, 0), (-1, -1), 7),
         ]
 
-        # --- 5. 计算染色位置 & 提取具体分数 ---
-        # 我们在这里顺便计算明细行数据
+        # 5. Calculate staining locations & extract specific scores
         breakdown_rows = []
 
         for col_idx, item in enumerate(rubric_items, start=1):
             orig_criterion = item.get('criterion', '')
             c_key = sanitize_key(orig_criterion)
 
-            # 从解析出的 ai_raw_feedback 中取值
             score_val = clean_scores_map.get(c_key, 0)
             try:
                 f_score = float(score_val)
             except:
                 f_score = 0
 
-            # 保存用于明细表显示
             breakdown_rows.append([Paragraph(orig_criterion, styles['Normal']), f"{item.get('weight')}%", f"{f_score}"])
 
-            # 只有分数大于0才染色
             if f_score > 0:
-                target_row = 5  # Fail
+                target_row = 5
                 if f_score >= 85:
                     target_row = 1
                 elif f_score >= 75:
@@ -900,7 +901,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         t.setStyle(TableStyle(table_style))
         elements.append(t)
 
-        # --- 6. 分数明细表 ---
+        # 6. Breakdown of scores
         elements.append(Spacer(1, 25))
         elements.append(Paragraph("<b>Score Breakdown Details</b>", styles['Heading3']))
 
@@ -914,7 +915,6 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         ]))
         elements.append(bt)
 
-        # 生成
         doc.build(elements)
         buffer.seek(0)
 
@@ -1165,6 +1165,108 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
         return Response({"message": "申诉处理成功，分数已同步更新"})
 
+    @action(detail=True, methods=['get'], url_path='teaching-insights')
+    def get_teaching_insights(self, request, pk=None):
+        """
+        AI 教学洞察：基于全班最高分表现，生成教学干预建议。
+        """
+        assignment = self.get_object()
+
+        # 1. 🚀 获取每个学生/小组的最高分提交记录 (内存去重逻辑)
+        all_subs = Submission.objects.filter(
+            assignment=assignment,
+            status='completed'
+        ).order_by('student', '-final_score', '-id').select_related('student', 'ai_evaluation')
+
+        best_submissions = []
+        seen_students = set()
+        for s in all_subs:
+            if s.student_id not in seen_students:
+                # 只有带有 AI 评价记录的才纳入统计，防止异常
+                if hasattr(s, 'ai_evaluation'):
+                    best_submissions.append(s)
+                    seen_students.add(s.student_id)
+
+        if not best_submissions:
+            return Response({"error": "暂无已评分的提交数据，无法生成分析报告。"}, status=400)
+
+        # 2. 📊 聚合统计知识点得分与反馈摘要
+        kp_stats = {}
+        common_issues = []
+        total_score_sum = 0
+
+        for sub in best_submissions:
+            total_score_sum += float(sub.final_score or 0)
+            evaluation = sub.ai_evaluation
+
+            # 安全提取 kp_scores
+            if evaluation.kp_scores and isinstance(evaluation.kp_scores, dict):
+                for kp_name, score in evaluation.kp_scores.items():
+                    if kp_name not in kp_stats:
+                        kp_stats[kp_name] = []
+                    try:
+                        kp_stats[kp_name].append(float(score))
+                    except (ValueError, TypeError):
+                        continue
+
+            # 收集反馈摘要用于 AI 分析上下文
+            if evaluation.feedback:
+                common_issues.append(evaluation.feedback[:80])  # 每人取80字摘要
+
+        if not kp_stats:
+            return Response({"error": "现有提交中缺少详细的知识点得分明细。"}, status=400)
+
+        # 3. 📉 计算汇总指标
+        kp_summary = [f"- {name}: 平均 {round(sum(v) / len(v), 1)}分" for name, v in kp_stats.items()]
+        class_avg = round(total_score_sum / len(best_submissions), 1)
+
+        # 4. 🤖 调用 AI 进行教情诊断
+        scorer = AIScorer()
+        prompt = f"""
+            You are a senior Computer Science Professor. Analyze the class performance for the assignment: '{assignment.title}'.
+
+            [Statistical Data]
+            - Total Students (Best Attempts): {len(best_submissions)}
+            - Class Average: {class_avg}
+            - Knowledge Point Mastery: 
+            {chr(10).join(kp_summary)}
+
+            [Student Feedback Snippets]
+            {chr(10).join(common_issues[:10])}
+
+            [Task]
+            Based on the data, identify collective weaknesses and provide actionable teaching advice.
+
+            [Output Requirement]
+            Return ONLY a JSON object with:
+            - "analysis": A brief summary of class performance.
+            - "strengths": A list of 2 key areas where the class excelled.
+            - "weaknesses": A list of 2 key areas needing improvement.
+            - "suggestions": A list of 3 specific teaching adjustments for the next lecture.
+            """
+
+        try:
+            # 使用我们之前优化过的 ask 方法
+            raw_res = scorer.ask(prompt)
+
+            # 彻底清洗可能存在的 Markdown 标签
+            import re
+            import json
+            clean_json = re.sub(r'```json\s?|\s?```', '', raw_res).strip()
+            insights = json.loads(clean_json)
+
+            return Response({
+                "stats": {
+                    "count": len(best_submissions),
+                    "average": class_avg,
+                    "kp_mastery": {k: round(sum(v) / len(v), 1) for k, v in kp_stats.items()}
+                },
+                "ai_insights": insights
+            })
+        except Exception as e:
+            print(f"DEBUG TEACHING INSIGHTS ERROR: {str(e)}")
+            return Response({"error": "AI 分析引擎暂时无法响应，请稍后再试。"}, status=500)
+
 
 class KnowledgePointViewSet(viewsets.ModelViewSet):
     """
@@ -1183,6 +1285,53 @@ class KnowledgePointViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         return qs
+
+
+class GroupViewSet(viewsets.ModelViewSet):
+    """
+    小组管理视图集：支持组建、加入、查看小组成员
+    """
+    queryset = Group.objects.all()
+    serializer_class = GroupSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        # 仅查看当前用户参与的小组，或当前课程下的小组
+        course_id = self.request.query_params.get('course')
+        if course_id:
+            return Group.objects.filter(course_id=course_id)
+        return Group.objects.filter(members=self.request.user)
+
+    def perform_create(self, serializer):
+        # 创建者自动成为组长并加入成员列表
+        group = serializer.save(leader=self.request.user)
+        group.members.add(self.request.user)
+
+    @action(detail=False, methods=['post'], url_path='join-by-code')
+    def join_by_code(self, request):
+        """
+        学生输入邀请码加入小组
+        """
+        code = request.data.get('invite_code', '').strip().upper()
+        if not code:
+            return Response({"error": "请输入小组邀请码"}, status=400)
+
+        try:
+            group = Group.objects.get(invite_code=code)
+
+            # 1. 校验人数上限（从该小组关联课程的作业中获取约束，或使用通用约束）
+            # 简单起见，这里可以校验 Group 成员数
+            if group.members.count() >= 10:  # 假设硬上限10人，或者你可以去查 Assignment
+                return Response({"error": "小组人数已满"}, status=400)
+
+            # 2. 校验是否已在当前课程的其他小组里
+            if Group.objects.filter(course=group.course, members=request.user).exists():
+                return Response({"error": "你已在当前课程的其他小组中，无法重复加入"}, status=400)
+
+            group.members.add(request.user)
+            return Response({"message": f"成功加入小组：{group.name}"})
+        except Group.DoesNotExist:
+            return Response({"error": "邀请码无效"}, status=404)
 
 
 class TeacherCourseViewSet(viewsets.ModelViewSet):
@@ -1641,11 +1790,25 @@ class StudentSubmissionViewSet(viewsets.ModelViewSet):
             assignment = Assignment.objects.get(id=assignment_id)
             student = request.user
 
+            # 用于小组身份的识别
+            target_group = None
+            if assignment.is_group:
+                target_group = Group.objects.filter(course=assignment.course, members=student).first()
+                if not target_group:
+                    return Response({"error": "该作业为小组作业，请先加入一个小组后再提交"}, status=403)
+
             # 1. Permission and frequency verification
             if not assignment.course.students.filter(id=student.id).exists():
                 return Response({"error": "You are not authorized to submit this assessment"}, status=403)
 
-            existing_count = Submission.objects.filter(student=student, assignment=assignment).count()
+            # 小组作业提交次数逻辑
+            submission_filter = {"assignment": assignment}
+            if assignment.is_group:
+                submission_filter["group"] = target_group
+            else:
+                submission_filter["student"] = student
+
+            existing_count = Submission.objects.filter(**submission_filter).count()
             if existing_count >= assignment.max_attempts:
                 return Response({"error": "The maximum number of submissions has been reached"}, status=400)
 
@@ -1659,6 +1822,7 @@ class StudentSubmissionViewSet(viewsets.ModelViewSet):
             # 3. Keep records
             submission = serializer.save(
                 student=student,
+                group=target_group,
                 attempt_number=existing_count + 1,
                 sub_type=calculated_sub_type,
                 status='pending'
@@ -2159,3 +2323,95 @@ class NotificationConfigViewSet(viewsets.ModelViewSet):
                 serializer.save()
                 return Response(serializer.data)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class DockerManagementViewSet(viewsets.ViewSet):
+    """
+    管理员端：Docker 沙箱基础设施监控与动态配置中心
+    """
+    # 建议此处使用你自定义的 IsAdminUser 权限，目前先用 IsAuthenticated 保证安全
+    permission_classes = [IsAuthenticated]
+
+    def _get_client(self):
+        """内部工具方法：安全获取 Docker 客户端连接"""
+        try:
+            return docker.from_env()
+        except Exception as e:
+            print(f"Docker Connection Error: {str(e)}")
+            return None
+
+    @action(detail=False, methods=['get'], url_path='status')
+    def get_status(self, request):
+        """
+        [监测功能] 获取 Docker 引擎的实时负载与容器状态
+        """
+        client = self._get_client()
+        if not client:
+            return Response({"error": "无法连接到 Docker 引擎，请检查服务是否启动"}, status=500)
+
+        try:
+            info = client.info()
+            # 获取当前正在运行的容器（用于识别系统负载）
+            running_containers = client.containers.list(filters={"status": "running"})
+
+            return Response({
+                "containers": {
+                    "total": info.get('Containers'),
+                    "running": len(running_containers),
+                    "paused": info.get('ContainersPaused'),
+                    "stopped": info.get('ContainersStopped'),
+                },
+                "images_count": info.get('Images'),
+                "engine_info": {
+                    "ncpu": info.get('NCPU'),
+                    "mem_total": info.get('MemTotal'),
+                    "os": info.get('OperatingSystem'),
+                    "version": info.get('ServerVersion')
+                }
+            })
+        except Exception as e:
+            return Response({"error": f"获取状态失败: {str(e)}"}, status=500)
+
+    @action(detail=False, methods=['get', 'post'], url_path='config')
+    def manage_config(self, request):
+        """
+        [管理功能] 动态读写 DockerRunner 的资源限额配置
+        """
+        # 利用你 model 里的 get_config() 自动获取单例配置
+        config = SystemConfiguration.get_config()
+
+        if request.method == 'GET':
+            serializer = SystemConfigurationSerializer(config)
+            return Response(serializer.data)
+
+        elif request.method == 'POST':
+            # 使用 partial=True 支持只修改 Docker 部分字段
+            serializer = SystemConfigurationSerializer(config, data=request.data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                return Response({
+                    "message": "Docker 运行策略已成功更新并刷新缓存",
+                    "data": serializer.data
+                })
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['post'], url_path='cleanup')
+    def cleanup_resources(self, request):
+        """
+        [自愈功能] 一键清理所有已停止的容器，防止磁盘被大量无用沙箱堆满
+        """
+        client = self._get_client()
+        if not client:
+            return Response({"error": "Docker 引擎不可用"}, status=500)
+
+        try:
+            pruned = client.containers.prune()
+            deleted_list = pruned.get('ContainersDeleted')
+            return Response({
+                "deleted_count": len(deleted_list) if deleted_list is not None else 0,
+                "space_reclaimed": pruned.get('SpaceReclaimed', 0),
+                "message": "清理完成"
+            })
+        except Exception as e:
+            return Response({"error": f"清理失败: {str(e)}"}, status=500)
+
