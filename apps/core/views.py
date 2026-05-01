@@ -57,58 +57,66 @@ from .utils.project_analyzer import ProjectAnalyzer
 @permission_classes([permissions.AllowAny])  # 🚀 必须允许匿名访问
 def register_teacher(request):
     """
-    教师自主注册接口
+    Teacher independent registration interface: realize the dual access mechanism of "mailbox verification + administrator review".
+    Business Logic:
+    1. Validation: Checks field integrity, username/email uniqueness, and enforces password complexity.
+    2. Account Lockdown: New accounts are initialized with `is_active=False` to prevent unauthorized login.
+    3. Workflow Tracking: Sets status to `pending_email` to mark the first phase of the onboarding pipeline.
+    4. Token Generation: Creates a unique UUID token for secure email-based identity confirmation.
+    5. Notification: Sends an automated email containing the activation link and informs the user about the subsequent admin review.
     """
     data = request.data
     username = data.get('username')
     email = data.get('email')
     password = data.get('password')
-    student_id_num = data.get('student_id_num')  # 工号
+    student_id_num = data.get('student_id_num')
 
     if not all([username, email, password]):
-        return Response({"error": "请填写所有必填字段"}, status=400)
+        return Response({"error": "Please fill in all required fields"}, status=400)
 
     try:
         validate_password(password)
     except exceptions.ValidationError as e:
         return Response({"error": list(e.messages)}, status=400)
-    # 1. 安全校验
 
     if User.objects.filter(username=username).exists():
-        return Response({"error": "用户名已存在"}, status=400)
+        return Response({"error": "The username already exists"}, status=400)
     if User.objects.filter(email=email).exists():
-        return Response({"error": "该邮箱已被注册"}, status=400)
+        return Response({"error": "The email has been registered"}, status=400)
 
     try:
         with transaction.atomic():
-            # 2. 创建用户：is_active=False 且状态为待验证
             user = User.objects.create_user(
                 username=username,
                 email=email,
                 password=password,
                 role='teacher',
                 student_id_num=student_id_num,
-                approval_status='pending_email',  # 🚀 关键：进入流程
-                is_active=False  # 🚀 关键：不可登录
+                approval_status='pending_email',
+                is_active=False
             )
 
-            # 3. 生成并保存 Token
+            # Generate and save the Token
             token_str = str(uuid.uuid4())
             EmailVerificationToken.objects.create(user=user, token=token_str)
 
-        # 4. 构造验证链接 (使用你 settings 里的 BACKEND_URL)
+        # Constructing validation links
         verify_link = f"{settings.BACKEND_URL}/api/auth/verify-email/?token={token_str}"
 
-        # 5. 发送邮件 (这里会根据你的配置，要么在控制台打印，要么真发邮件)
-        subject = "【智能编程教学系统】教师邮箱验证通知"
-        message = f"尊敬的老师，您好：\n\n感谢您注册本系统。请点击以下链接完成邮箱验证：\n\n{verify_link}\n\n验证通过后，您的账号将进入管理员审核阶段。审核结果将另行通知。"
+        # Sending an email
+        subject = "[Intelligent Programming Teaching System] Teacher Email verification notice"
+        message = (
+            f"Dear Teacher,\n\n"
+            f"Thank you for registering. Please click the link below to verify your email address:\n\n{verify_link}\n\n"
+            f"Once verified, your account will enter the administrator review stage. You will be notified of the result separately."
+        )
 
         send_mail(subject, message, settings.EMAIL_HOST_USER, [email])
 
-        return Response({"message": "注册信息已提交！验证邮件已发出，请去邮箱查收。"}, status=201)
+        return Response({"message": "Registration submitted! A verification email has been sent to your inbox."}, status=201)
 
     except Exception as e:
-        return Response({"error": f"系统繁忙，请稍后再试: {str(e)}"}, status=500)
+        return Response({"error": f"System busy, please try again later: {str(e)}"}, status=500)
 
 
 @api_view(['GET'])
