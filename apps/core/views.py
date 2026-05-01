@@ -123,35 +123,40 @@ def register_teacher(request):
 @permission_classes([permissions.AllowAny])
 def verify_email(request):
     """
-    验证 Token 并流转审核状态，完成后跳转回前端
+    Validates the verification token and advances the account's approval state.
+
+    Workflow:
+    1. Token Retrieval: Extracts the unique UUID from the email link.
+    2. Expiration Logic: Checks if the token is within its 24-hour validity window. If expired,
+       the "skeleton" user record is purged to allow re-registration.
+    3. State Transition: Moves the user from `pending_email` to `pending_approval`.
+    4. Token Cleanup: Deletes the token after successful use to prevent replay attacks.
+    5. Frontend Handoff: Redirects the browser back to the SPA (Single Page Application)
+       with query parameters to trigger success/error UI states.
     """
     token_str = request.query_params.get('token')
     if not token_str:
-        # 如果非法访问，跳转回登录页并提示错误
+        # If the access is illegal, jump back to the login page with an error
         return redirect(f'{settings.BACKEND_URL.replace("8000", "5173")}/login?verify=invalid')
 
     try:
-        # 1. 寻找 Token
+        # 1. Looking for tokens
         token_obj = EmailVerificationToken.objects.get(token=token_str)
 
-        # 2. 检查有效性 (24小时内)
+        # 2. Check validity (within 24 hours)
         if not token_obj.is_valid():
             user = token_obj.user
             token_obj.delete()
             user.delete()
-            # 跳转回前端，告诉用户过期了
             return redirect(f'{settings.BACKEND_URL.replace("8000", "5173")}/login?verify=expired')
 
-        # 3. 修改状态
         user = token_obj.user
         user.approval_status = 'pending_approval'
         user.save()
 
-        # 4. 销毁已使用的 Token
         token_obj.delete()
 
-        # 🚀 5. 重定向到前端登录页面
-        # 假设你的前端在 5173 端口，我们带上 verify=success 参数
+        # Redirect to the frontend login page
         frontend_login_url = f'http://localhost:5173/login?verify=success'
         return redirect(frontend_login_url)
 
