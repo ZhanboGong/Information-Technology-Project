@@ -54,7 +54,7 @@ from .utils.project_analyzer import ProjectAnalyzer
 # Sprint 2
 
 @api_view(['POST'])
-@permission_classes([permissions.AllowAny])  # 🚀 必须允许匿名访问
+@permission_classes([permissions.AllowAny])
 def register_teacher(request):
     """
     Teacher independent registration interface: realize the dual access mechanism of "mailbox verification + administrator review".
@@ -304,9 +304,20 @@ def get_global_assignment_reminders(request):
 
 def log_action(user, action, target_type, target_id=None, detail=""):
     """
-    快捷记录系统日志
+    Centralized utility to record system-wide operation logs for auditing.
+
+    Business Value:
+    1. Accountability: Tracks "Who did What, When, and to Whom," which is essential for security compliance.
+    2. Debugging: Provides a chronological history of changes, making it easier to trace the root cause of system state changes.
+    3. Transparency: Allows administrators to monitor sensitive operations like user approvals or score adjustments.
+    :param user: The user instance performing the action.
+    :param action: A descriptive verb/slug (e.g., 'approve_teacher', 'delete_course').
+    :param target_type: The category of the object being acted upon (e.g., 'User', 'Assignment').
+    :param target_id: The unique identifier of the target object.
+    :param detail: Additional context or JSON-formatted metadata about the change.
+    :return:
     """
-    from .models import SystemOperationLog # 确保能找到刚才定义的模型
+    from .models import SystemOperationLog
     SystemOperationLog.objects.create(
         user=user,
         action=action,
