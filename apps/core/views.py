@@ -15,11 +15,15 @@ from django.db import transaction
 from django.contrib.auth.hashers import make_password
 from django.http import FileResponse, HttpResponse
 from django.utils import timezone
+from django.core.mail import send_mail
+from django.core import exceptions
+from django.shortcuts import redirect
 from datetime import timedelta
 from django.utils.encoding import escape_uri_path
 from django.shortcuts import get_object_or_404
 from django.db.models import Max, Count, Q
 from django.db.models.functions import TruncDate
+from django.contrib.auth.password_validation import validate_password
 from rest_framework import viewsets, permissions, status, serializers
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -36,7 +40,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 
 # Import the model and serializer
 from .models import (User, Course, Assignment, Submission, AIEvaluation, KnowledgePoint, SystemConfiguration,
-                     NotificationConfig, Group)
+                     NotificationConfig, Group, SystemOperationLog, EmailVerificationToken)
 from .serializers import (
     AssignmentSerializer,
     SubmissionSerializer,
@@ -48,6 +52,105 @@ from .utils.ai_scorer import AIScorer
 from .utils.project_analyzer import ProjectAnalyzer
 
 # Sprint 2
+
+@api_view(['POST'])
+@permission_classes([permissions.AllowAny])  # 🚀 必须允许匿名访问
+def register_teacher(request):
+    """
+    教师自主注册接口
+    """
+    data = request.data
+    username = data.get('username')
+    email = data.get('email')
+    password = data.get('password')
+    student_id_num = data.get('student_id_num')  # 工号
+
+    if not all([username, email, password]):
+        return Response({"error": "请填写所有必填字段"}, status=400)
+
+    try:
+        validate_password(password)
+    except exceptions.ValidationError as e:
+        return Response({"error": list(e.messages)}, status=400)
+    # 1. 安全校验
+
+    if User.objects.filter(username=username).exists():
+        return Response({"error": "用户名已存在"}, status=400)
+    if User.objects.filter(email=email).exists():
+        return Response({"error": "该邮箱已被注册"}, status=400)
+
+    try:
+        with transaction.atomic():
+            # 2. 创建用户：is_active=False 且状态为待验证
+            user = User.objects.create_user(
+                username=username,
+                email=email,
+                password=password,
+                role='teacher',
+                student_id_num=student_id_num,
+                approval_status='pending_email',  # 🚀 关键：进入流程
+                is_active=False  # 🚀 关键：不可登录
+            )
+
+            # 3. 生成并保存 Token
+            token_str = str(uuid.uuid4())
+            EmailVerificationToken.objects.create(user=user, token=token_str)
+
+        # 4. 构造验证链接 (使用你 settings 里的 BACKEND_URL)
+        verify_link = f"{settings.BACKEND_URL}/api/auth/verify-email/?token={token_str}"
+
+        # 5. 发送邮件 (这里会根据你的配置，要么在控制台打印，要么真发邮件)
+        subject = "【智能编程教学系统】教师邮箱验证通知"
+        message = f"尊敬的老师，您好：\n\n感谢您注册本系统。请点击以下链接完成邮箱验证：\n\n{verify_link}\n\n验证通过后，您的账号将进入管理员审核阶段。审核结果将另行通知。"
+
+        send_mail(subject, message, settings.EMAIL_HOST_USER, [email])
+
+        return Response({"message": "注册信息已提交！验证邮件已发出，请去邮箱查收。"}, status=201)
+
+    except Exception as e:
+        return Response({"error": f"系统繁忙，请稍后再试: {str(e)}"}, status=500)
+
+
+@api_view(['GET'])
+@permission_classes([permissions.AllowAny])
+def verify_email(request):
+    """
+    验证 Token 并流转审核状态，完成后跳转回前端
+    """
+    token_str = request.query_params.get('token')
+    if not token_str:
+        # 如果非法访问，跳转回登录页并提示错误
+        return redirect(f'{settings.BACKEND_URL.replace("8000", "5173")}/login?verify=invalid')
+
+    try:
+        # 1. 寻找 Token
+        token_obj = EmailVerificationToken.objects.get(token=token_str)
+
+        # 2. 检查有效性 (24小时内)
+        if not token_obj.is_valid():
+            user = token_obj.user
+            token_obj.delete()
+            user.delete()
+            # 跳转回前端，告诉用户过期了
+            return redirect(f'{settings.BACKEND_URL.replace("8000", "5173")}/login?verify=expired')
+
+        # 3. 修改状态
+        user = token_obj.user
+        user.approval_status = 'pending_approval'
+        user.save()
+
+        # 4. 销毁已使用的 Token
+        token_obj.delete()
+
+        # 🚀 5. 重定向到前端登录页面
+        # 假设你的前端在 5173 端口，我们带上 verify=success 参数
+        frontend_login_url = f'http://localhost:5173/login?verify=success'
+        return redirect(frontend_login_url)
+
+    except EmailVerificationToken.DoesNotExist:
+        return redirect(f'http://localhost:5173/login?verify=invalid')
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def export_assignment_grades(request, assignment_id):
@@ -186,6 +289,19 @@ def get_global_assignment_reminders(request):
     reminders.sort(key=lambda x: x['deadline'])
     return Response(reminders)
 
+def log_action(user, action, target_type, target_id=None, detail=""):
+    """
+    快捷记录系统日志
+    """
+    from .models import SystemOperationLog # 确保能找到刚才定义的模型
+    SystemOperationLog.objects.create(
+        user=user,
+        action=action,
+        target_type=target_type,
+        target_id=str(target_id) if target_id else None,
+        detail=detail
+    )
+
 # Identity verification and permissions
 
 class MyTokenObtainPairView(TokenObtainPairView):
@@ -214,7 +330,10 @@ class IsTeacher(permissions.BasePermission):
         :param view: The view instance currently attempting to access.
         :return: bool: Returns True if the user is logged in and the role is 'teacher', False otherwise.
         """
-        return request.user.is_authenticated and request.user.role == 'teacher'
+        if not (request.user and request.user.is_authenticated):
+            return False
+
+        return request.user.role == 'teacher' and request.user.approval_status == 'approved'
 
 
 # Teacher Side View
@@ -299,6 +418,16 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
             # The saving of the Model layer is finally performed
             assignment.save()
+            try:
+                SystemOperationLog.objects.create(
+                    user=request.user,
+                    action="CREATE",
+                    target_type="Assignment",
+                    target_id=str(assignment.id),
+                    detail=f"publish new assignment: {assignment.title}"
+                )
+            except Exception as log_e:
+                print(f"Logging failure: {log_e}")
         except Exception as e:
             print(f"JSON manually compensates for the failure: {str(e)}")
 
@@ -368,6 +497,16 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
                 assignment.knowledge_points.set(kp_ids)
 
             assignment.save()
+            try:
+                SystemOperationLog.objects.create(
+                    user=request.user,
+                    action="UPDATE",
+                    target_type="Assignment",
+                    target_id=str(assignment.id),
+                    detail=f"update assignment content: {assignment.title}"
+                )
+            except Exception as log_e:
+                print(f"Logging failure: {log_e}")
         except Exception as e:
             print(f"⚠️ Update JSON/M2M Patch Error: {e}")
 
@@ -390,7 +529,8 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         删除作业逻辑：确保数据安全与逻辑一致性
         """
         instance = self.get_object()
-
+        assign_id = instance.id
+        assign_title = instance.title
         # 1. 安全检查：使用更健壮的检查方式
         # 无论你是否定义了 related_name，instance.submissions 都能根据你的配置灵活调整
         # 如果你确定没改 related_name，submission_set 也是对的
@@ -407,6 +547,17 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         try:
             with transaction.atomic():
                 self.perform_destroy(instance)
+
+                try:
+                    SystemOperationLog.objects.create(
+                        user=request.user,
+                        action="DELETE",
+                        target_type="Assignment",
+                        target_id=str(assign_id),
+                        detail=f"delete assignment: {assign_title}"
+                    )
+                except Exception as log_e:
+                    print(f"Logging failure: {log_e}")
 
             return Response(
                 {"message": "Assignment deleted successfully"},
@@ -431,6 +582,17 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         assignment = self.get_object()
         evals = AIEvaluation.objects.filter(submission__assignment=assignment)
         count = evals.update(is_published=True)
+        try:
+            SystemOperationLog.objects.create(
+                user=request.user,
+                action="PUBLISH",
+                target_type="Assignment",
+                target_id=str(assignment.id),
+                detail=f"Batch published {count} scoring results for assignment: {assignment.title}"
+            )
+        except Exception as log_e:
+            print(f"Logging failure: {log_e}")
+
         return Response({"message": f"Successfully published {count} records"})
 
     @action(detail=False, methods=['post'], url_path='update-score')
@@ -451,6 +613,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         new_feedback = request.data.get('feedback')
         try:
             evaluation = AIEvaluation.objects.get(submission_id=submission_id)
+            old_score = evaluation.total_score
             evaluation.total_score = new_score
             evaluation.feedback = new_feedback
             evaluation.teacher_reviewed = True
@@ -459,6 +622,20 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
             sub = evaluation.submission
             sub.final_score = new_score
             sub.save()
+            try:
+                SystemOperationLog.objects.create(
+                    user=request.user,
+                    action="UPDATE_SCORE",
+                    target_type="Submission",
+                    target_id=str(submission_id),
+                    detail=(
+                        f"Manually adjusted score for student {sub.student.username}. "
+                        f"Score change: {old_score} -> {new_score}. "
+                        f"Assignment: {sub.assignment.title}"
+                    )
+                )
+            except Exception as log_e:
+                print(f"Logging failure: {log_e}")
             return Response({"message": "The results have been updated and published"})
         except AIEvaluation.DoesNotExist:
             return Response({"error": "Evaluation records do not exist"}, status=404)
@@ -604,6 +781,16 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
             if not best_submission:
                 best_submission = original_sub
+            try:
+                SystemOperationLog.objects.create(
+                    user=request.user,
+                    action="DOWNLOAD",
+                    target_type="Submission",
+                    target_id=str(best_submission.id),
+                    detail=f"Downloaded code for student: {best_submission.student.username} (Attempt {best_submission.attempt_number})"
+                )
+            except Exception as log_e:
+                print(f"Logging failure: {log_e}")
 
             file_handle = best_submission.file.open()
             ext = os.path.splitext(best_submission.file.name)[1]
@@ -649,6 +836,16 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         if not submissions.exists():
             return Response({"error": "No record of submission"}, status=404)
 
+        try:
+            SystemOperationLog.objects.create(
+                user=request.user,
+                action="EXPORT",
+                target_type="Assignment",
+                target_id=str(assignment.id),
+                detail=f"Batch exported (ZIP) all highest submissions for assignment: {assignment.title}"
+            )
+        except Exception as log_e:
+            print(f"Logging failure: {log_e}")
         byte_io = io.BytesIO()
         with zipfile.ZipFile(byte_io, 'w', zipfile.ZIP_DEFLATED) as zip_file:
             for sub in submissions:
@@ -918,6 +1115,17 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         doc.build(elements)
         buffer.seek(0)
 
+        try:
+            SystemOperationLog.objects.create(
+                user=request.user,
+                action="EXPORT_PDF",
+                target_type="Submission",
+                target_id=str(submission.id),
+                detail=f"Exported PDF report for student {submission.student.username}. Assignment: {assignment.title}"
+            )
+        except Exception as log_e:
+            print(f"Logging failure: {log_e}")
+
         filename = f"Report_{submission.student.student_id_num}.pdf"
         response = HttpResponse(buffer, content_type='application/pdf')
         response['Content-Disposition'] = f"attachment; filename*=utf-8''{escape_uri_path(filename)}"
@@ -1078,6 +1286,16 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
                 except Exception as e:
                     print(f"FAILED TO GENERATE PDF for {sub.student.student_id_num}: {e}")
                     continue
+        try:
+            SystemOperationLog.objects.create(
+                user=request.user,
+                action="EXPORT_ALL_PDF",
+                target_type="Assignment",
+                target_id=str(assignment.id),
+                detail=f"Batch exported {len(best_submissions)} PDF reports for class: {assignment.title}"
+            )
+        except Exception as log_e:
+            print(f"Logging failure: {log_e}")
 
         # 3. Constructing the response
         byte_io.seek(0)
@@ -1175,6 +1393,24 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
             sub = appeal.evaluation.submission
             sub.status = 'completed'
             sub.save()
+
+            try:
+                log_detail = f"Resolved appeal for student {sub.student.username}."
+                if new_score is not None:
+                    log_detail += f" Score adjusted to {new_score}."
+                else:
+                    log_detail += " Maintained original score."
+                log_detail += f" Remark: {teacher_remark[:50]}"
+
+                SystemOperationLog.objects.create(
+                    user=request.user,
+                    action="RESOLVE_APPEAL",
+                    target_type="Appeal",
+                    target_id=str(appeal.id),
+                    detail=log_detail
+                )
+            except Exception as log_e:
+                print(f"Logging failure: {log_e}")
 
         return Response({"message": "The appeal was processed successfully and the score was updated synchronously"})
 
@@ -1379,9 +1615,20 @@ class TeacherCourseViewSet(viewsets.ModelViewSet):
         """
         # Force the teacher field of the course to be the current logged-in user
         if self.request.user.role != 'admin':
-            serializer.save(teacher=self.request.user)
+            course = serializer.save(teacher=self.request.user)
         else:
-            serializer.save()
+            course = serializer.save()
+
+        try:
+            SystemOperationLog.objects.create(
+                user=self.request.user,
+                action="CREATE",
+                target_type="Course",
+                target_id=str(course.id),
+                detail=f"Created a new course: {course.name}"
+            )
+        except Exception as log_e:
+            print(f"Logging failure: {log_e}")
 
     def perform_update(self, serializer):
         """
@@ -1390,16 +1637,41 @@ class TeacherCourseViewSet(viewsets.ModelViewSet):
         :return:
         """
         if self.request.user.role != 'admin':
-            serializer.save(teacher=self.request.user)
+            course = serializer.save(teacher=self.request.user)
         else:
-            serializer.save()
+            course = serializer.save()
+
+        try:
+            SystemOperationLog.objects.create(
+                user=self.request.user,
+                action="UPDATE",
+                target_type="Course",
+                target_id=str(course.id),
+                detail=f"Updated course information: {course.name}"
+            )
+        except Exception as log_e:
+            print(f"Logging failure: {log_e}")
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
+        course_id = instance.id
+        course_name = instance.name
         if instance.assignments.exists():
             return Response({"error": "There are already assignments for this course. Please delete them first."}, status=400)
 
         self.perform_destroy(instance)
+
+        try:
+            from .models import SystemOperationLog
+            SystemOperationLog.objects.create(
+                user=request.user,
+                action="DELETE",
+                target_type="Course",
+                target_id=str(course_id),
+                detail=f"Deleted course: {course_name}"
+            )
+        except Exception as log_e:
+            print(f"Logging failure: {log_e}")
         return Response({"message": "Course deleted successfully"}, status=204)
 
     @action(detail=True, methods=['get'], url_path='students')
@@ -1445,7 +1717,23 @@ class TeacherCourseViewSet(viewsets.ModelViewSet):
             students_to_remove = course.students.filter(id__in=student_ids)
             count = students_to_remove.count()
 
+            student_names = ", ".join([s.username for s in students_to_remove[:3]])
+            if count > 3:
+                student_names += f" and {count - 3} others"
+
             course.students.remove(*students_to_remove)
+
+            try:
+                from .models import SystemOperationLog
+                SystemOperationLog.objects.create(
+                    user=request.user,
+                    action="REMOVE_MEMBER",
+                    target_type="Course",
+                    target_id=str(course.id),
+                    detail=f"Removed {count} students from course '{course.name}'. Targets: {student_names}"
+                )
+            except Exception as log_e:
+                print(f"Logging failure: {log_e}")
 
             return Response({
                 "message": f"Successfully removed {count} students from the course.",
@@ -1514,7 +1802,9 @@ class TeacherStudentManagementViewSet(viewsets.ViewSet):
                             'first_name': str(row.get('name', '')).strip(),
                             'class_name': str(row.get('class', '')).strip(),
                             'role': 'student',
-                            'password': make_password(sid)
+                            'password': make_password(sid),
+                            'approval_status': 'approved',
+                            'is_active': True
                         }
                     )
 
@@ -1525,6 +1815,22 @@ class TeacherStudentManagementViewSet(viewsets.ViewSet):
                         if not target_course.students.filter(id=user.id).exists():
                             target_course.students.add(user)
                             enrolled_count += 1
+
+            try:
+                detail_msg = f"Bulk imported students from file: {file.name}. "
+                detail_msg += f"Results: {created_count} new accounts created, {enrolled_count} students enrolled."
+                if course_id:
+                    detail_msg += f" Target Course ID: {course_id}"
+
+                SystemOperationLog.objects.create(
+                    user=request.user,
+                    action="IMPORT",
+                    target_type="User",
+                    target_id=None,
+                    detail=detail_msg
+                )
+            except Exception as log_e:
+                print(f"Logging failure: {log_e}")
 
             return Response({
                 "message": f"Import success: {created_count} new student accounts are created and {enrolled_count} people are added to the course."
@@ -1695,6 +2001,23 @@ class StudentAssignmentViewSet(viewsets.ReadOnlyModelViewSet):
             appeal_placeholder.status = 'pending_teacher' if is_reasonable else 'rejected_by_ai'
             appeal_placeholder.save()
 
+            try:
+                from .models import SystemOperationLog
+
+                # 记录详情：包括申诉是否被 AI 认为合理
+                ai_res = "Reasonable" if is_reasonable else "Unreasonable"
+                log_detail = f"Student submitted an appeal for '{assignment.title}'. AI Pre-audit: {ai_res}."
+
+                SystemOperationLog.objects.create(
+                    user=request.user,  # 这里的 user 是学生
+                    action="SUBMIT_APPEAL",
+                    target_type="Appeal",
+                    target_id=str(appeal_placeholder.id),
+                    detail=log_detail
+                )
+            except Exception as log_e:
+                print(f"Logging failure: {log_e}")
+
             return Response({
                 "status": "success",
                 "is_reasonable": is_reasonable,
@@ -1705,6 +2028,18 @@ class StudentAssignmentViewSet(viewsets.ReadOnlyModelViewSet):
             appeal_placeholder.ai_judgment = f"AI audit service exception: {str(e)}"
             appeal_placeholder.status = 'pending_teacher'
             appeal_placeholder.save()
+            from .models import SystemOperationLog
+            try:
+                SystemOperationLog.objects.create(
+                    user=request.user,
+                    action="APPEAL_AI_ERROR",
+                    target_type="Appeal",
+                    target_id=str(appeal_placeholder.id),
+                    detail=f"AI Pre-audit service failed. Error: {str(e)[:100]}. Automatically assigned to teacher."
+                )
+            except:
+                pass
+
             return Response({
                 "error": "The AI pre-review has expired, and the system has automatically transferred it to the teacher for manual review",
                 "is_reasonable": True
@@ -1965,6 +2300,11 @@ class UserProfileViewSet(viewsets.GenericViewSet):
         if not user.check_password(serializer.data.get('old_password')):
             return Response({"error": "Old password wrong"}, status=status.HTTP_400_BAD_REQUEST)
 
+        new_pwd = serializer.data.get('new_password')
+        try:
+            validate_password(new_pwd, user=user)
+        except exceptions.ValidationError as e:
+            return Response({"error": list(e.messages)}, status=status.HTTP_400_BAD_REQUEST)
         # Set a new password
         user.set_password(serializer.data.get('new_password'))
         user.save()
@@ -2028,6 +2368,16 @@ class SystemConfigViewSet(viewsets.ViewSet):
         serializer = SystemConfigurationSerializer(config, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
+            try:
+                SystemOperationLog.objects.create(
+                    user=request.user,
+                    action="UPDATE",
+                    target_type="SystemConfig",
+                    target_id="1",
+                    detail=f"The administrator modified the system global configuration"
+                )
+            except Exception as e:
+                print(f" Logging failure: {e}")
             return Response({"message": "System configuration has been updated.", "data": serializer.data})
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -2169,8 +2519,14 @@ class AdminUserManagementViewSet(viewsets.ModelViewSet):
         role = self.request.query_params.get('role')
         search = self.request.query_params.get('search')
 
+        status_filter = self.request.query_params.get('status')
+
         if role and role != 'all':
             queryset = queryset.filter(role=role)
+
+        if status_filter:
+            if status_filter in ['approved', 'pending_approval', 'pending_email', 'rejected']:
+                queryset = queryset.filter(approval_status=status_filter)
 
         if search:
             queryset = queryset.filter(
@@ -2213,13 +2569,105 @@ class AdminUserManagementViewSet(viewsets.ModelViewSet):
         :param serializer: An instance of UserProfileSerializer that has passed the format check.
         :return:
         """
+        validated_password = serializer.validated_data.get('password')
+
         student_id = self.request.data.get('student_id_num', '')
-        password = make_password(student_id if student_id else "123456")
+
+        if validated_password:
+            final_password = make_password(validated_password)
+        else:
+            default_pwd = student_id if student_id else "123456"
+            final_password = make_password(default_pwd)
+
+        final_username = student_id if student_id else serializer.validated_data.get('username')
 
         serializer.save(
-            password=password,
-            username=student_id if student_id else serializer.validated_data.get('username')
+            password=final_password,
+            username=final_username
         )
+
+    @action(detail=True, methods=['post'], url_path='approve')
+    def approve_teacher(self, request, pk=None):
+        """
+        管理员：批准教师注册并发送账号通知邮件
+        """
+        user = self.get_object()
+
+        if user.role != 'teacher':
+            return Response({"error": "该用户不是教师，无需审批流程"}, status=400)
+
+        if user.approval_status == 'approved':
+            return Response({"message": "该账号已经是激活状态"}, status=200)
+
+        # 1. 执行审批通过逻辑
+        with transaction.atomic():
+            user.approval_status = 'approved'
+            user.is_active = True  # 🚀 关键：激活账号，允许登录
+            user.save()
+
+        # 2. 准备邮件内容
+        # 注意：Django 数据库不存储明文密码。
+        # 如果老师是自己注册的，他应该知道密码。但为了友好，我们提醒他使用注册时设置的密码。
+        subject = "【系统通知】您的教师账号已审核通过"
+        message = f"""
+    尊敬的 {user.username} 老师：
+
+    您的教师账号申请已通过管理员审核！现在您可以登录系统开展教学工作。
+
+    【账号信息】
+    - 登录账号：{user.username}
+    - 登录密码：您注册时设置的密码
+    - 登录地址：{settings.BACKEND_URL.replace('8000', '5173')}/login
+
+    如果您忘记了密码，请联系管理员重置。
+
+    祝您使用愉快！
+    智能编程教育系统团队
+        """
+
+        # 3. 发送邮件
+        try:
+            send_mail(
+                subject,
+                message,
+                settings.EMAIL_HOST_USER,
+                [user.email],
+                fail_silently=False
+            )
+
+            # 记录操作日志
+            log_action(request.user, "APPROVE_TEACHER", "User", user.id, f"Approved teacher: {user.username}")
+
+            return Response({"message": f"教师 {user.username} 审核已通过，通知邮件已发出。"})
+        except Exception as e:
+            # 即使邮件发送失败，账号其实已经激活了，这里报个警即可
+            return Response({
+                "message": f"账号 {user.username} 已激活，但邮件通知发送失败。",
+                "error": str(e)
+            }, status=200)
+
+    @action(detail=True, methods=['post'], url_path='reject')
+    def reject_teacher(self, request, pk=None):
+        """
+        管理员：驳回教师注册
+        """
+        user = self.get_object()
+        reason = request.data.get('reason', '提供的信息不完整或不符合规范。')
+
+        user.approval_status = 'rejected'
+        user.rejected_reason = reason
+        user.save()
+
+        # 发送驳回通知
+        subject = "【系统通知】您的教师账号申请审核未通过"
+        message = f"尊敬的 {user.username} 老师：\n\n很抱歉，您的账号申请未通过审核。\n原因：{reason}\n\n如有疑问请联系管理员。"
+
+        try:
+            send_mail(subject, message, settings.EMAIL_HOST_USER, [user.email])
+        except:
+            pass
+
+        return Response({"message": f"已驳回教师 {user.username} 的申请"})
 
 
 class SystemMonitorView(APIView):
@@ -2303,21 +2751,33 @@ class AdminSystemLogView(APIView):
 
     def get(self, request):
         # Obtain the latest 50 AI invocation logs
-        logs = AIServiceLog.objects.select_related().all().order_by('-created_at')[:50]
+        ai_logs = AIServiceLog.objects.select_related().all().order_by('-created_at')[:50]
 
-        log_data = []
-        for log in logs:
-            log_data.append({
-                "id": log.id,
-                "service": log.service_name,
-                "endpoint": log.endpoint,
-                "tokens": log.total_tokens,
-                "latency": f"{int(log.response_time * 1000)}ms",
-                "status": log.status_code,
-                "time": log.created_at
-            })
+        ops_logs = SystemOperationLog.objects.select_related('user').all().order_by('-created_at')[:50]
 
-        return Response(log_data)
+        return Response({
+            "ai_logs": [
+                {
+                    "id": log.id,
+                    "service": log.service_name,
+                    "endpoint": log.endpoint,
+                    "tokens": log.total_tokens,
+                    "latency": f"{int(log.response_time * 1000)}ms",
+                    "status": log.status_code,
+                    "time": log.created_at
+                } for log in ai_logs
+            ],
+            "ops_logs": [
+                {
+                    "id": log.id,
+                    "user": log.user.username if log.user else "Unknown",
+                    "action": log.action,
+                    "target": log.target_type,
+                    "detail": log.detail,
+                    "time": log.created_at
+                } for log in ops_logs
+            ]
+        })
 
 
 class NotificationConfigViewSet(viewsets.ModelViewSet):
