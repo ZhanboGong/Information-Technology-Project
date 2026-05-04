@@ -137,7 +137,7 @@ def verify_email(request):
     token_str = request.query_params.get('token')
     if not token_str:
         # If the access is illegal, jump back to the login page with an error
-        return redirect(f'{settings.BACKEND_URL.replace("8000", "5173")}/login?verify=invalid')
+        return redirect(f'{settings.FRONTEND_URL}/login?verify=invalid')
 
     try:
         # 1. Looking for tokens
@@ -148,7 +148,7 @@ def verify_email(request):
             user = token_obj.user
             token_obj.delete()
             user.delete()
-            return redirect(f'{settings.BACKEND_URL.replace("8000", "5173")}/login?verify=expired')
+            return redirect(f'{settings.FRONTEND_URL}/login?verify=expired')
 
         user = token_obj.user
         user.approval_status = 'pending_approval'
@@ -157,11 +157,11 @@ def verify_email(request):
         token_obj.delete()
 
         # Redirect to the frontend login page
-        frontend_login_url = f'http://localhost:5173/login?verify=success'
+        frontend_login_url = f'{settings.FRONTEND_URL}/login?verify=success'
         return redirect(frontend_login_url)
 
     except EmailVerificationToken.DoesNotExist:
-        return redirect(f'http://localhost:5173/login?verify=invalid')
+        return redirect(f'{settings.FRONTEND_URL}/login?verify=invalid')
 
 
 @api_view(['GET'])
@@ -219,7 +219,7 @@ def export_assignment_grades(request, assignment_id):
                     clean_str = re.sub(r'```json|```', '', evaluation.ai_raw_feedback).strip()
                     raw_json = json.loads(clean_str)
                     scores_dict = raw_json.get('scores', raw_json)
-                except:
+                except (json.JSONDecodeError, KeyError):
                     scores_dict = {}
 
             for kp_name in rubric_names:
@@ -413,7 +413,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
                         data.setlist('knowledge_points', [i.get('id') for i in parsed_kp if i.get('id')])
                     else:
                         data.setlist('knowledge_points', parsed_kp)
-            except:
+            except (json.JSONDecodeError, ValueError):
                 pass
 
         # 2. Instantiate and validate (in this case rubric_config is {}, it must pass the format check)
@@ -499,7 +499,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
                 # Compatible with multiple front-end value passing formats: [1,2] or [{id:1}, {id:2}]
                 kp_ids = [i.get('id') if isinstance(i, dict) else i for i in parsed_kp]
                 data.setlist('knowledge_points', kp_ids)
-            except:
+            except (json.JSONDecodeError, ValueError):
                 pass
 
         # 2. Validate and save the underlying fields (title, date, etc.)
@@ -774,6 +774,90 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         except Exception as e:
             print(f"AI KP Generation Error: {str(e)}")
             return Response({"error": f"AI generation failed: {str(e)}"}, status=500)
+
+    @action(detail=False, methods=['post'], url_path='suggest-rubric')
+    def suggest_rubric(self, request):
+        """
+        AI 智能生成作业评分标准矩阵 (Rubric Matrix)
+
+        逻辑：
+        1. 接收老师输入的标题、要求和编程语言。
+        2. 构造 Prompt，要求 AI 输出 3-5 个评分维度。
+        3. 每个维度包含 Weight(权重) 和 5 个等级 (HD/D/C/P/Fail) 的详细描述。
+        4. 确保输出格式严格匹配前端的 rubric_config 结构。
+        """
+        title = request.data.get('title', 'New Assignment')
+        content = request.data.get('content', '')
+        language = request.data.get('language', 'python')
+
+        if not content:
+            return Response({"error": "Please provide assignment requirements first."}, status=400)
+
+        scorer = AIScorer()
+
+        # 构造 Prompt，强制 AI 遵循你前端定义的 5 个等级名称
+        prompt = f"""
+                You are an expert Computer Science Professor. Please design a professional grading rubric matrix for the following programming assignment.
+
+                [Assignment Title]: {title}
+                [Requirements]: {content}
+                [Programming Language]: {language}
+
+                Task:
+                Create 3-5 distinct assessment criteria (e.g., Logical Correctness, Code Quality, Algorithm Efficiency).
+                For each criterion, provide detailed descriptions for exactly 5 performance levels:
+                1. "High Distinction (85-100%)"
+                2. "Distinction (75-84%)"
+                3. "Credit (65-74%)"
+                4. "Pass (50-64%)"
+                5. "Fail (0-49%)"
+
+                Requirements:
+                - The sum of 'weight' for all criteria must be exactly 100.
+                - Output ONLY raw JSON. No markdown tags like ```json.
+                - Follow this exact structure:
+                {{
+                    "rubric": {{
+                        "items": [
+                            {{
+                                "criterion": "Criterion Name",
+                                "weight": 25,
+                                "description": "Brief goal of this dimension",
+                                "detailed_rubric": {{
+                                    "High Distinction (85-100%)": "...",
+                                    "Distinction (75-84%)": "...",
+                                    "Credit (65-74%)": "...",
+                                    "Pass (50-64%)": "...",
+                                    "Fail (0-49%)": "..."
+                                }}
+                            }}
+                        ]
+                    }}
+                }}
+            """
+
+        try:
+            raw_res = scorer.ask(prompt)
+            # 清洗 AI 可能带出的 Markdown 标签
+            import re
+            clean_json = re.sub(r'```json\s?|\s?```', '', raw_res).strip()
+            rubric_data = json.loads(clean_json)
+
+            # 校验权重总和，如果 AI 算错了，后端做一个简单的最后兜底（或者让老师去改）
+            items = rubric_data.get('rubric', {}).get('items', [])
+            total_w = sum(item.get('weight', 0) for item in items)
+
+            # 如果权重不等于100，尝试平均分配或保持原样让老师调整
+            if total_w != 100 and len(items) > 0:
+                print(f"Warning: AI generated total weight {total_w} instead of 100")
+
+            return Response(rubric_data)
+
+        except json.JSONDecodeError:
+            return Response({"error": "AI returned an invalid format. Please try again."}, status=500)
+        except Exception as e:
+            traceback.print_exc()
+            return Response({"error": f"AI Rubric generation failed: {str(e)}"}, status=500)
 
     @action(detail=False, methods=['get'], url_path='download-submission')
     def download_single_submission(self, request):
@@ -1101,7 +1185,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
             score_val = clean_scores_map.get(c_key, 0)
             try:
                 f_score = float(score_val)
-            except:
+            except (ValueError, TypeError):
                 f_score = 0
 
             breakdown_rows.append([Paragraph(orig_criterion, styles['Normal']), f"{item.get('weight')}%", f"{f_score}"])
@@ -1232,7 +1316,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
                             if match:
                                 data_obj = json.loads(match.group(1))
                                 student_scores_data = data_obj.get('scores', data_obj.get('kp_scores', data_obj))
-                        except:
+                        except (json.JSONDecodeError, KeyError, TypeError):
                             pass
 
                     this_clean_map = {sanitize_key(k): v for k, v in student_scores_data.items()}
@@ -1277,7 +1361,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
                         score_val = this_clean_map.get(c_key, 0)
                         try:
                             fs = float(score_val)
-                        except:
+                        except (ValueError, TypeError):
                             fs = 0
 
                         breakdown_rows.append([Paragraph(orig_c, styles['Normal']), f"{item.get('weight')}%", f"{fs}"])
@@ -2061,7 +2145,7 @@ class StudentAssignmentViewSet(viewsets.ReadOnlyModelViewSet):
                     target_id=str(appeal_placeholder.id),
                     detail=f"AI Pre-audit service failed. Error: {str(e)[:100]}. Automatically assigned to teacher."
                 )
-            except:
+            except Exception:
                 pass
 
             return Response({
@@ -2269,6 +2353,53 @@ class StudentSubmissionViewSet(viewsets.ModelViewSet):
             traceback.print_exc()
             submission.status = 'failed'
             submission.save()
+
+
+    @action(detail=True, methods=['get'], url_path='recommend-resources')
+    def recommend_resources(self, request, pk=None):
+        """
+        Retrieves or generates personalized learning resources based on the evaluation.
+
+        Workflow Logic:
+        1. Pre-requisite Check: Ensures an AI evaluation exists; otherwise, recommendations
+           cannot be contextualized.
+        2. "Instant-Load" Cache: Checks the database for pre-computed resources (usually
+           generated during the initial grading pipeline). This ensures sub-second response times.
+        3. Dynamic Fallback: If resources are missing (e.g., due to a pipeline timeout), the
+           method triggers an immediate AI request to generate them on the fly.
+        4. Persistence: Saves any newly generated resources back to the database to optimize
+           future requests.
+        :param request: A structured list of recommended tutorials, documentation, and exercises.
+        """
+        submission = self.get_object()
+
+        # 1. If there is no rating record, it cannot be recommended
+        if not hasattr(submission, 'ai_evaluation'):
+            return Response({"error": "This submission has not been evaluated yet."}, status=400)
+
+        evaluation = submission.ai_evaluation
+
+        # 2. If GradingPipeline has already been generated and stored in the database, it returns
+        if evaluation.learning_resources:
+            return Response(evaluation.learning_resources)
+
+        try:
+            scorer = AIScorer()
+            resources = scorer.generate_learning_resources(
+                assignment_title=submission.assignment.title,
+                category=submission.assignment.category,
+                feedback=evaluation.feedback,
+                kp_scores=evaluation.kp_scores
+            )
+
+            # Synchronization to the database
+            evaluation.learning_resources = resources
+            evaluation.save(update_fields=['learning_resources'])
+
+            return Response(resources)
+        except Exception as e:
+            print(f"Manual Recommend Error: {str(e)}")
+            return Response({"error": "Failed to generate recommendations at this time."}, status=500)
 
 
 class UserProfileViewSet(viewsets.GenericViewSet):
@@ -2641,7 +2772,7 @@ class AdminUserManagementViewSet(viewsets.ModelViewSet):
     【账号信息】
     - 登录账号：{user.username}
     - 登录密码：您注册时设置的密码
-    - 登录地址：{settings.BACKEND_URL.replace('8000', '5173')}/login
+    - 登录地址：{settings.FRONTEND_URL}/login
 
     如果您忘记了密码，请联系管理员重置。
 
@@ -2688,7 +2819,7 @@ class AdminUserManagementViewSet(viewsets.ModelViewSet):
 
         try:
             send_mail(subject, message, settings.EMAIL_HOST_USER, [user.email])
-        except:
+        except Exception:
             pass
 
         return Response({"message": f"已驳回教师 {user.username} 的申请"})
@@ -2708,13 +2839,56 @@ class SystemMonitorView(APIView):
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     def get(self, request):
-        import random
-        nodes = [
-            {'name': 'Core API Server', 'status': 'Online', 'load': random.randint(20, 40),
-             'desc': 'Django Gunicorn Stack'},
-            {'name': 'Celery Worker 01', 'status': 'Online', 'load': random.randint(5, 30), 'desc': 'Grading Runner'},
-            {'name': 'Redis Broker', 'status': 'Online', 'load': random.randint(1, 5), 'desc': 'Message Queue'},
-        ]
+        import redis as redis_lib
+
+        # 1. 检测真实服务状态
+        nodes = []
+
+        # Core API Server: 检测自身进程
+        nodes.append({
+            'name': 'Core API Server',
+            'status': 'Online',
+            'load': 0,
+            'desc': 'Django REST Framework'
+        })
+
+        # Redis Broker: 尝试 ping
+        try:
+            r = redis_lib.Redis(host='127.0.0.1', port=6379, db=0, socket_timeout=2)
+            r.ping()
+            nodes.append({
+                'name': 'Redis Broker',
+                'status': 'Online',
+                'load': 0,
+                'desc': 'Message Queue'
+            })
+        except Exception:
+            nodes.append({
+                'name': 'Redis Broker',
+                'status': 'Offline',
+                'load': 0,
+                'desc': 'Connection Failed'
+            })
+
+        # Docker Worker: 检查是否有 grading 容器在运行
+        try:
+            import docker
+            client = docker.from_env()
+            containers = client.containers.list(filters={"status": "running"})
+            grading_count = sum(1 for c in containers if 'grading' in c.name.lower() or 'celery' in c.name.lower())
+            nodes.append({
+                'name': 'Celery Worker',
+                'status': 'Online' if grading_count > 0 else 'Idle',
+                'load': grading_count,
+                'desc': f'{grading_count} active task(s)'
+            })
+        except Exception:
+            nodes.append({
+                'name': 'Celery Worker',
+                'status': 'Unknown',
+                'load': 0,
+                'desc': 'Docker unavailable'
+            })
 
         # 2. Get the latest task
         recent_tasks = Submission.objects.order_by('-created_at')[:5]
@@ -2729,15 +2903,11 @@ class SystemMonitorView(APIView):
             })
 
         # 3. Obtain the actual AI performance data from AIServiceLog
-        # Retrieve the last 20 logs for plotting the trend chart
         ai_logs = AIServiceLog.objects.order_by('-created_at')[:20]
 
-        # Calculate the average delay and the total amount of Tokens
         if ai_logs.exists():
             avg_latency = sum(log.response_time for log in ai_logs) / ai_logs.count()
             total_tokens_24h = sum(log.total_tokens for log in ai_logs)
-
-            # Construct the trend chart data (response_time)
             latency_history = [int(log.response_time * 1000) for log in reversed(ai_logs)]
         else:
             avg_latency = 0
