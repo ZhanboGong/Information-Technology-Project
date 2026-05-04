@@ -7,6 +7,7 @@ from django.db.models import Max
 from apps.core.models import Submission, DockerReport, AIEvaluation
 from .docker_runner import DockerRunner
 from .ai_scorer import AIScorer
+from .static_analyzer import StaticAnalyzer
 
 
 class GradingPipeline:
@@ -46,19 +47,21 @@ class GradingPipeline:
         """
         print(f"--- Start the automated correction pipeline: Submission {self.submission.id} ---")
 
-        # 状态锁定：防止重复执行
+        # State locking: Prevents repeated execution
         self.submission.status = 'running'
         self.submission.save(update_fields=['status'])
 
         try:
-            # 第一阶段：Docker 沙箱运行获取事实证据
+            # Phase 1: Docker sandbox run to get factual evidence
             docker_report = self.run_stage_one_docker(entry_point, work_dir)
 
-            # 第二阶段：AI 语义评分与数据持久化
-            self.run_stage_two_ai(docker_report, work_dir)
+            static_report = self.run_stage_one_static(work_dir)
+
+            # Phase 2: AI Semantic Scoring and Data Persistence
+            self.run_stage_two_ai(docker_report, work_dir, static_report=static_report)
 
         except Exception as e:
-            print(f"流水线执行失败: {str(e)}")
+            print(f"Pipeline execution fails: {str(e)}")
             self.submission.status = 'failed'
             self.submission.save(update_fields=['status'])
             raise e
@@ -75,44 +78,42 @@ class GradingPipeline:
         target_file = None
         valid_extensions = ('.py', '.java')
 
-        # 调试日志：核对传入参数
+        # Debug logs: Check the passed arguments
         print(f"DEBUG | Received Params - entry_point: {entry_point}, work_dir: {work_dir}")
 
         if work_dir and os.path.exists(work_dir):
-            # 诊断日志：强制列出解压目录下的所有文件结构，排查解压是否成功
-            print(f"🔍 Listing files in work_dir ({work_dir}):")
+            # Diagnostic log: Force to list all file structures in the unpacked directory to check whether the unpacked is successful
+            print(f"Listing files in work_dir ({work_dir}):")
             for root, dirs, files in os.walk(work_dir):
                 print(f"   Directory: {root}")
                 for f in files:
                     print(f"     - {f}")
 
-            # 步骤 A：如果有传入入口点，优先合成绝对路径
+            # Step A: If there are incoming entry points, preferentially synthesize absolute paths
             if entry_point:
                 potential_path = os.path.join(work_dir, entry_point) if not os.path.isabs(entry_point) else entry_point
                 if os.path.exists(potential_path) and potential_path.lower().endswith(valid_extensions):
                     target_file = potential_path
-                    print(f"✅ Resolved entry_point to: {target_file}")
+                    print(f"Resolved entry_point to: {target_file}")
 
-            # 步骤 B：如果入口点无效或未提供，执行递归搜索
+            # Step B: If the entry point is invalid or not provided, perform a recursive search
             if not target_file:
-                print(f"🔍 Entry point missing or invalid. Searching for code files in: {work_dir}")
+                print(f"Entry point missing or invalid. Searching for code files in: {work_dir}")
                 for root, dirs, files in os.walk(work_dir):
-                    # 忽略隐藏文件夹
                     dirs[:] = [d for d in dirs if not d.startswith('.')]
                     for f in files:
                         if f.lower().endswith(valid_extensions):
                             target_file = os.path.join(root, f)
-                            print(f"✅ Auto-detected source file: {target_file}")
+                            print(f"Auto-detected source file: {target_file}")
                             break
                     if target_file: break
 
         if not target_file:
             target_file = self.submission.file.path
-            print(f"ℹ️ No source file found in work_dir. Falling back to submission path: {target_file}")
+            print(f"No source file found in work_dir. Falling back to submission path: {target_file}")
 
-        print(f"🚀 Docker Pipeline final target path: {target_file}")
+        print(f"Docker Pipeline final target path: {target_file}")
 
-        # 调用 Runner
         docker_res = self.runner.run_code(
             file_path=target_file,
             is_project=bool(work_dir),
@@ -130,7 +131,26 @@ class GradingPipeline:
         )
         return report
 
-    def run_stage_two_ai(self, docker_report, work_dir=None):
+    def run_stage_one_static(self, work_dir=None):
+        """
+        Executes the initial static analysis phase of the grading pipeline.
+
+        Business Logic:
+        1. Scope Detection: Determines if the submission is a single script or an unzipped project archive.
+        2. Dispatching:
+           - If no `work_dir` exists, it analyzes the raw uploaded file (Single File Mode).
+           - If a `work_dir` is provided (e.g., after unzipping a .zip or .tar), it performs a
+             recursive scan of the entire directory (Project Mode).
+        3. Metric Harvesting: Collects LOC, Complexity, and Maintainability Index data to
+        be used as "Ground Truth" for the subsequent AI Stage.
+        :param work_dir: The temporary directory path where a compressed project has been extracted.
+        :return: A dictionary containing aggregated static metrics (Complexity, SLOC, etc.).
+        """
+        if not work_dir or not os.path.exists(work_dir):
+            return StaticAnalyzer.analyze(self.submission.file.path)
+        return StaticAnalyzer.analyze_project(work_dir)
+
+    def run_stage_two_ai(self, docker_report, work_dir=None, static_report=None):
         """
         Phase 2: Perform AI semantic scoring, multi-dimensional data persistence, and global score alignment.
 
@@ -149,7 +169,7 @@ class GradingPipeline:
         """
         with transaction.atomic():
             # 1. Call AI to get structured review data
-            eval_data = self.scorer.evaluate_code(self.submission, docker_report, project_path=work_dir)
+            eval_data = self.scorer.evaluate_code(self.submission, docker_report, project_path=work_dir, static_report=static_report)
 
             # Fractional precision conversion
             try:
@@ -160,16 +180,24 @@ class GradingPipeline:
 
             # 2. Shadow Storage Logic: Separating Statistical and detailed partitions
             stats_scores = eval_data.get('stats_scores', {"Logic": 0, "Design": 0, "Style": 0})
-
+            kp_scores = eval_data.get('kp_scores', {})
+            detailed_feedback = eval_data.get('feedback', "The AI review did not generate content")
             # The detailed dimensions defined by the teacher (such as Parts 1-7) are stored in the ai_raw_feedback field
             detailed_scores_json = json.dumps(eval_data.get('scores', {}), ensure_ascii=False)
-
+            print(f"Generating learning resources for submission {self.submission.id}...")
+            learning_resources = self.scorer.generate_learning_resources(
+                assignment_title=self.submission.assignment.title,
+                category=self.submission.assignment.category,
+                feedback=detailed_feedback,
+                kp_scores=kp_scores
+            )
             log_content = str(docker_report.stdout) if docker_report.stdout else "No running logs"
 
             # 3. Strictly align model fields to persist data
             AIEvaluation.objects.update_or_create(
                 submission=self.submission,
                 defaults={
+                    'static_analysis': static_report,
                     # Base score field
                     'total_score': current_score,
                     'feedback': eval_data.get('feedback', "The AI review did not generate content"),
@@ -180,6 +208,8 @@ class GradingPipeline:
                     # Structured scoring fields
                     'scores': stats_scores,
                     'kp_scores': eval_data.get('kp_scores', {}),
+
+                    'learning_resources': learning_resources,
 
                     # Backup of evidence
                     'raw_response': json.dumps(eval_data, ensure_ascii=False),
