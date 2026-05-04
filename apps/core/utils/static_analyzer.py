@@ -1,0 +1,200 @@
+import os
+import re
+
+
+class StaticAnalyzer:
+    """
+    Static Code Analysis Engine.
+
+    This utility quantifies code quality by measuring structural metrics:
+    - Python: Uses the 'radon' library for professional-grade analysis.
+    - Java: Uses regex-based heuristics for structural approximation.
+    """
+
+    @staticmethod
+    def analyze(file_path):
+        """
+        Dispatches the analysis strategy based on the file extension.
+        :param file_path: Path to the source file to be analyzed.
+        :return: Dictionary containing language-specific metrics.
+        """
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext == '.py':
+            return StaticAnalyzer.analyze_python(file_path)
+        elif ext == '.java':
+            return StaticAnalyzer.analyze_java(file_path)
+        return {}
+
+    @staticmethod
+    def analyze_python(file_path):
+        """
+        Performs deep structural analysis of Python code using the Radon library.
+
+        Metrics tracked:
+        1. Cyclomatic Complexity (CC): Measures independent paths through code.
+        2. Maintainability Index (MI): A weighted score representing ease of maintenance.
+        3. Raw Metrics: Physical (LOC) vs Logical (SLOC) line counts.
+        :param file_path: Path to the .py file.
+        :return: Detailed structural metrics for Python code.
+        """
+        try:
+            from radon.complexity import cc_visit, cc_rank
+            import radon.mi
+            from radon.raw import analyze as raw_analyze
+
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                code = f.read()
+
+            # 1. 圈复杂度
+            cc_results = cc_visit(code)
+            cc_scores = []
+            for block in cc_results:
+                cc_scores.append({
+                    'name': block.name,
+                    'complexity': block.complexity,
+                    'rank': cc_rank(block.complexity)
+                })
+            avg_cc = sum(c['complexity'] for c in cc_scores) / len(cc_scores) if cc_scores else 0
+            max_cc = max((c['complexity'] for c in cc_scores), default=0)
+
+            # 2. 可维护性指数
+            mi_score = radon.mi.mi_visit(code, True)
+
+            # 3. 原始指标（LOC, SLOC, comments 等）
+            raw = raw_analyze(code)
+
+            return {
+                'language': 'python',
+                'total_loc': raw.loc,
+                'sloc': raw.sloc,
+                'comments': raw.comments,
+                'comment_ratio': round(raw.comments / raw.loc * 100, 1) if raw.loc > 0 else 0,
+                'blank_lines': raw.blank,
+                'cyclomatic_complexity': {
+                    'average': round(avg_cc, 2),
+                    'max': max_cc,
+                    'functions': cc_scores[:20]
+                },
+                'maintainability_index': round(mi_score, 1),
+                'function_count': len(cc_scores)
+            }
+        except Exception as e:
+            return {'language': 'python', 'error': str(e)}
+
+    @staticmethod
+    def analyze_java(file_path):
+        """
+        Performs heuristic-based Java code analysis using Regular Expressions.
+
+        This approach approximates structural metrics without requiring a
+        full Abstract Syntax Tree (AST) parser or JVM environment.
+        :param file_path: Path to the .java file.
+        :return: Estimated structural metrics for Java code.
+        """
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                code = f.read()
+
+            lines = code.split('\n')
+            total_loc = len(lines)
+
+            # 有效代码行（去掉空行和纯注释行）
+            code_lines = [l for l in lines if l.strip() and not l.strip().startswith('//') and not l.strip().startswith('*')]
+            sloc = len(code_lines)
+
+            # 注释行
+            comment_lines = [l for l in lines if l.strip().startswith('//') or l.strip().startswith('*')]
+
+            # 方法数量
+            methods = re.findall(r'(?:public|private|protected|static|\s)+[\w<>\[\]]+\s+(\w+)\s*\(', code)
+            method_count = len(methods)
+
+            # 嵌套深度（简化：计算最大缩进层级）
+            max_depth = 0
+            for line in code_lines:
+                stripped = line.lstrip()
+                if stripped:
+                    indent = len(line) - len(stripped)
+                    depth = indent // 4  # 假设 4 空格缩进
+                    max_depth = max(max_depth, depth)
+
+            # 近似圈复杂度（统计分支关键字）
+            branch_keywords = re.findall(
+                r'\b(if|else\s+if|elif|for|while|case|catch|&&|\|\|)\b', code
+            )
+            estimated_cc = 1 + len(branch_keywords)  # 基础 CC = 1 + 分支数
+
+            return {
+                'language': 'java',
+                'total_loc': total_loc,
+                'sloc': sloc,
+                'comments': len(comment_lines),
+                'comment_ratio': round(len(comment_lines) / total_loc * 100, 1) if total_loc > 0 else 0,
+                'blank_lines': total_loc - sloc - len(comment_lines),
+                'cyclomatic_complexity': {
+                    'average': round(estimated_cc / max(method_count, 1), 2),
+                    'max': estimated_cc,
+                    'functions': []
+                },
+                'max_nesting_depth': max_depth,
+                'method_count': method_count
+            }
+        except Exception as e:
+            return {'language': 'java', 'error': str(e)}
+
+    @staticmethod
+    def analyze_project(project_path):
+        """
+        Walks through a project directory to aggregate global quality statistics.
+
+        It filters out non-source directories (e.g., venv, git) to ensure the
+        metrics reflect the student's actual logic and not library code.
+        :param project_path: Root path of the submitted project/archive.
+        :return: Aggregated summary of metrics across all identified files.
+        """
+        results = []
+        skip_dirs = {'__pycache__', 'venv', '.git', 'node_modules', '.idea', 'migrations'}
+        for root, dirs, files in os.walk(project_path):
+            dirs[:] = [d for d in dirs if d not in skip_dirs]
+            for f in files:
+                if f.endswith(('.py', '.java')):
+                    path = os.path.join(root, f)
+                    result = StaticAnalyzer.analyze(path)
+                    if result and 'error' not in result:
+                        results.append(result)
+
+        if not results:
+            return {'files_analyzed': 0, 'summary': {}}
+
+        # 汇总
+        total_loc = sum(r.get('total_loc', 0) for r in results)
+        total_sloc = sum(r.get('sloc', 0) for r in results)
+        all_cc = []
+        total_methods = 0
+        for r in results:
+            cc = r.get('cyclomatic_complexity', {})
+            all_cc.extend(cc.get('functions', []))
+            if not cc.get('functions') and cc.get('max', 0) > 0:
+                all_cc.append({'complexity': cc['max']})
+            total_methods += r.get('function_count', r.get('method_count', 0))
+
+        avg_cc = sum(c['complexity'] for c in all_cc) / len(all_cc) if all_cc else 0
+        max_cc = max((c['complexity'] for c in all_cc), default=0)
+
+        # 可维护性指数取平均
+        mi_scores = [r.get('maintainability_index', 50) for r in results if 'maintainability_index' in r]
+        avg_mi = sum(mi_scores) / len(mi_scores) if mi_scores else 50
+
+        return {
+            'files_analyzed': len(results),
+            'summary': {
+                'total_loc': total_loc,
+                'total_sloc': total_sloc,
+                'cyclomatic_complexity': {
+                    'average': round(avg_cc, 2),
+                    'max': max_cc
+                },
+                'maintainability_index': round(avg_mi, 1),
+                'function_count': total_methods
+            }
+        }
