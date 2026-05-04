@@ -1,7 +1,10 @@
 import json
 import re
 import traceback
-from django.db.models import Avg
+from django.db.models import Avg, Max, Count
+from django.db.models.functions import TruncDate
+from django.utils import timezone
+from datetime import timedelta
 from rest_framework import viewsets, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -50,67 +53,76 @@ class AnalyticsViewSet(viewsets.ViewSet):
 
     @action(detail=True, methods=['get'], url_path='course-dashboard')
     def course_dashboard(self, request, pk=None):
-        """
-        Teacher end: Class-wide academic performance statistics dashboard.
-        Business Logic:
-        1. Permission Check: Strictly verify whether the requester has the 'teacher' role.
-        2. Performance Evolution Trend (History): Statistically calculate the average class score of all previous assignments in this course, reflecting the fluctuations in teaching effectiveness.
-        3. Class Capability Radar (Radar): Summarize the knowledge point scores from all AI evaluations in the class (without hierarchical divisions),
-        constructing an overall skill map of the class.
-        4. Visual Noise Reduction (Smart Thinning): When there are too many knowledge point dimensions, automatically execute the "Two-Extremes Filtering Algorithm",
-        retaining only 4 dimensions with the highest and lowest scores each, helping teachers quickly identify "teaching achievements" and "weak links".
-        :param pk: Course ID
-        """
         if request.user.role != 'teacher':
             return Response({"error": "Insufficient permissions"}, status=403)
+
+        from django.db.models import Avg, Max, Count
+        from django.db.models.functions import TruncDate
+        from django.utils import timezone
+        from datetime import timedelta
 
         try:
             course = Course.objects.get(id=pk)
             assignments = Assignment.objects.filter(course=course).order_by('created_at')
 
-            # Statistics of Homework Trends
+            # 1. 作业成绩历史趋势 (取每生最高分)
             trend = []
             for asm in assignments:
-                res = Submission.objects.filter(
+                student_best_scores = Submission.objects.filter(
                     assignment=asm,
                     ai_evaluation__is_published=True
-                ).aggregate(avg=Avg('final_score'))
-                avg_score = res['avg'] or 0
+                ).values('student').annotate(max_score=Max('final_score'))
+
+                if student_best_scores:
+                    avg_score = sum(item['max_score'] for item in student_best_scores) / len(student_best_scores)
+                else:
+                    avg_score = 0
 
                 trend.append({
                     "task": asm.title,
                     "score": round(float(avg_score), 1)
                 })
 
-            # Class Knowledge Summary (L1 + L2)
-            kp_mastery = {}
-            evals = AIEvaluation.objects.filter(submission__assignment__course=course, is_published=True)
+            # 2. 每日递交活跃度
+            two_weeks_ago = timezone.now() - timedelta(days=14)
+            daily_stats = Submission.objects.filter(
+                assignment__course=course,
+                created_at__gte=two_weeks_ago
+            ).annotate(day=TruncDate('created_at')).values('day').annotate(count=Count('id')).order_by('day')
 
-            for ev in evals:
+            submission_trend = [{"date": item['day'].strftime('%m-%d'), "count": item['count']} for item in daily_stats]
+
+            # 3. 技能雷达
+            all_evals = AIEvaluation.objects.filter(submission__assignment__course=course,
+                                                    is_published=True).select_related('submission')
+            kp_mastery = {}
+            for ev in all_evals:
                 kp_data = self._extract_kp_scores(ev)
                 for kp_name, score in kp_data.items():
                     clean_name = kp_name.split('(')[0].strip()
                     kp_mastery.setdefault(clean_name, []).append(float(score))
 
-            # Calculate the average score
             raw_averages = {name: round(sum(scores) / len(scores), 1) for name, scores in kp_mastery.items()}
-
+            processed_radar = raw_averages
             if len(raw_averages) > 8:
                 sorted_items = sorted(raw_averages.items(), key=lambda x: x[1])
-                # Select the 4 with the lowest scores and the 4 with the highest scores
-                selected_data = dict(sorted_items[:4] + sorted_items[-4:])
-                processed_radar = selected_data
-            else:
-                processed_radar = raw_averages
+                processed_radar = dict(sorted_items[:4] + sorted_items[-4:])
+
+            # --- 4. 🚀 关键修复：汇总平均分计算 ---
+            # 仅针对已经有成绩的作业计算总平均分，过滤掉无人提交的作业（0分项）
+            valid_scores = [t['score'] for t in trend if t['score'] > 0]
+            total_avg = sum(valid_scores) / len(valid_scores) if valid_scores else 0
 
             return Response({
                 "summary": {
-                    "average_score": round(float(evals.aggregate(avg=Avg('total_score'))['avg'] or 0), 1),
-                    "total_submissions": evals.count()
+                    "average_score": round(float(total_avg), 1),
+                    "total_submissions": all_evals.count()
                 },
                 "history": trend,
+                "submission_trend": submission_trend,
                 "l2_knowledge_radar": processed_radar
             })
+
         except Exception as e:
             traceback.print_exc()
             return Response({"error": str(e)}, status=500)
@@ -171,58 +183,98 @@ class AnalyticsViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['post'], url_path='get-study-resource')
     def get_study_resource(self, request):
         """
-        AI 智能导学：根据学生薄弱的知识点生成学习链接和建议。
-        逻辑：
-        1. 获取前端传来的 kp_name。
-        2. 调用 AIScorer (利用其动态配置属性)。
-        3. 提示 AI 返回结构化的 JSON，包含资源链接和核心建议。
+        Provides targeted video resources and study tips.
+        Logic Workflow:
+        1. Intent Identification: Captures the Knowledge Point (KP) the student is struggling with.
+        2. AI Query Optimization: Uses the LLM to transform a raw KP name into a professional
+           educational search query and generates a contextual study tip.
+        3. YouTube API Integration: Attempts to fetch the top-rated educational video
+           programmatically using the YouTube Data API.
+        4. Robust Fallback: If the API fails or the key is missing, it constructs a direct
+           YouTube search URL so the student is never left without resources.
+        :param request: A JSON object containing the video URL and an actionable study tip.
+        :return:
         """
         kp_name = request.data.get('kp_name')
         if not kp_name:
             return Response({"error": "Knowledge point name is required"}, status=400)
 
-
         scorer = AIScorer()
 
-        # 构建针对性 Prompt
+        # Ask the AI to act as a librarian to find the best content
         prompt = f"""
-            The student is struggling with the programming concept: "{kp_name}".
-            As an expert tutor, provide a high-quality online resource for them to learn this.
+        The student is struggling with: "{kp_name}".
+        Generate a YouTube search query to find a good tutorial video for this topic.
+        Keep it short and specific (2-5 words).
 
-            Requirements:
-            1. The URL should be a reputable technical site (e.g., MDN, RealPython, GeeksforGeeks, or official docs).
-            2. Provide a "study_tip" which is a one-sentence actionable advice for this specific topic.
-
-            Output ONLY a valid JSON object:
-            {{
-                "url": "https://...",
-                "study_tip": "Focus on understanding how..."
-            }}
-            """
+        Return a JSON object:
+        {{
+            "query": "Java LinkedList tutorial",
+            "study_tip": "One sentence actionable advice..."
+        }}
+        """
 
         try:
-            # 使用 AIScorer 的 ask 接口
-            raw_response = scorer.ask(prompt)
+            # Step 1: Call the LLM to get an optimized search query
+            response = scorer.client.chat.completions.create(
+                model=scorer.model,
+                messages=[
+                    {"role": "system", "content": "Output ONLY a JSON object."},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format={'type': 'json_object'},
+                temperature=0
+            )
 
-            # 清洗并解析 JSON
-            # 兼容 AI 可能返回的 Markdown 代码块格式
-            clean_json = re.sub(r'```json\s*|\s*```', '', raw_response).strip()
+            # Step 2: Clean and parse the AI response
+            raw_res = response.choices[0].message.content
+            clean_json = re.sub(r'```json\s?|\s?```', '', raw_res).strip()
             data = json.loads(clean_json)
 
-            return Response({
-                "kp_name": kp_name,
-                "url": data.get('url'),
-                "study_tip": data.get('study_tip', "Keep practicing to master this concept!")
-            })
+            search_query = data.get('query', kp_name)
+            study_tip = data.get('study_tip', "Keep practicing to master this concept!")
 
-        except Exception as e:
-            # 兜底逻辑：如果 AI 请求失败，返回基础搜索链接
-            fallback_url = f"https://www.google.com/search?q={kp_name}+programming+tutorial"
-            return Response({
-                "kp_name": kp_name,
-                "url": fallback_url,
-                "study_tip": "Try searching for specific tutorials and building small projects."
-            })
+        except Exception:
+            # Fallback if the LLM call fails
+            search_query = kp_name
+            study_tip = "Try searching for specific tutorials and building small projects."
+
+        # Step 3: Integrate with YouTube Data API v3
+        import os, requests as req
+        YOUTUBE_API_KEY = os.environ.get('YOUTUBE_API_KEY', '')
+
+        if YOUTUBE_API_KEY:
+            try:
+                yt_response = req.get(
+                    "https://www.googleapis.com/youtube/v3/search",
+                    params={
+                        "part": "snippet",
+                        "q": f"{search_query} tutorial",
+                        "type": "video",
+                        "maxResults": 1,
+                        "key": YOUTUBE_API_KEY,
+                        "videoCategoryId": "28"
+                    },
+                    timeout=5
+                )
+                items = yt_response.json().get('items', [])
+                if items:
+                    video_id = items[0]['id']['videoId']
+                    return Response({
+                        "kp_name": kp_name,
+                        "url": f"https://www.youtube.com/watch?v={video_id}",
+                        "study_tip": study_tip
+                    })
+            except Exception:
+                pass
+
+        # Step 4: Final Fallback - Generate a direct search result link
+        fallback_url = f"https://www.youtube.com/results?search_query={search_query.replace(' ', '+')}+tutorial"
+        return Response({
+            "kp_name": kp_name,
+            "url": fallback_url,
+            "study_tip": study_tip
+        })
 
 
 
