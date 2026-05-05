@@ -1,6 +1,7 @@
 import docker
 import os
 import re
+from apps.core.models import SystemConfiguration
 
 
 class DockerRunner:
@@ -67,6 +68,8 @@ class DockerRunner:
         :param project_root: Project root directory, inferred automatically if not specified.
         :return: This includes exit_code, output, status, and compile_status.
         """
+        config = SystemConfiguration.get_config()
+
         if not self.client:
             return {"exit_code": -1, "output": "Docker service unavailable", "status": "error"}
 
@@ -82,10 +85,10 @@ class DockerRunner:
             "volumes": {effective_root: {'bind': '/workspace', 'mode': 'rw'}},
             "working_dir": '/workspace',
             "detach": True,
-            "mem_limit": "512m",
-            "nano_cpus": 1000000000,
+            "mem_limit": config.docker_mem_limit, # "512m"
+            "nano_cpus": config.docker_cpu_quota, # 1000000000
             "network_disabled": True,
-            "pids_limit": 50,
+            "pids_limit": config.docker_pids_limit,# 50
             "remove": False
         }
 
@@ -116,7 +119,7 @@ class DockerRunner:
         try:
             container = self.client.containers.run(image, command, **container_config)
             try:
-                result = container.wait(timeout=25)
+                result = container.wait(timeout=config.docker_timeout)# 25
                 exit_code = result.get("StatusCode", 0)
                 # 获取最后 2000 行日志，防止内存溢出
                 output = container.logs(tail=2000).decode('utf-8', errors='replace')
