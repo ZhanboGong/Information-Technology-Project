@@ -1,6 +1,10 @@
 import json
+import re
+from django.contrib.auth.password_validation import validate_password
+from django.core import exceptions
 from rest_framework import serializers
-from .models import User, Assignment, Submission, Course, AIEvaluation, KnowledgePoint, DockerReport, SystemConfiguration, Appeal, NotificationConfig
+from .models import (User, Assignment, Submission, Course, AIEvaluation, KnowledgePoint, DockerReport,
+                     SystemConfiguration, Appeal, NotificationConfig, Group, TeachingInsightReport)
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 
@@ -72,18 +76,46 @@ class CourseSerializer(serializers.ModelSerializer):
         super(CourseSerializer, self).__init__(*args, **kwargs)
         request = self.context.get('request')
 
-        # 🚀 动态权限控制：
-        # 普通老师（非 admin）在编辑和查看时，teacher 字段均设为只读
         if request and request.user:
             if request.user.role != 'admin':
                 self.fields['teacher'].read_only = True
 
 
+class GroupSerializer(serializers.ModelSerializer):
+    """
+    暂时不用
+    """
+    member_details = UserSerializer(source='members', many=True, read_only=True)
+    leader_name = serializers.ReadOnlyField(source='leader.username')
+    course_name = serializers.ReadOnlyField(source='course.name')
+
+    class Meta:
+        model = Group
+        fields = [
+            'id', 'name', 'course', 'course_name', 'leader',
+            'leader_name', 'members', 'member_details',
+            'invite_code', 'created_at'
+        ]
+        read_only_fields = ['id', 'leader', 'invite_code', 'created_at']
+
+
 # --- 5. Assessment serializer ---
 class AssignmentSerializer(serializers.ModelSerializer):
+    """
+    Serializer for the Assignment model.
+
+    Responsibilities:
+    1. Relation Mapping: Flattens related object data (e.g., Course Name).
+    2. Computed Fields: Uses SerializerMethodFields to provide real-time stats like submission counts.
+    3. UI Helpers: Extracts file names from attachment paths for better display.
+    4. Knowledge Point Integration: Nested serialization for detailed KP insights.
+    """
     course_name = serializers.ReadOnlyField(source='course.name')
     kp_details = KnowledgePointSerializer(source='knowledge_points', many=True, read_only=True)
     attachment_name = serializers.SerializerMethodField()
+
+    has_report = serializers.SerializerMethodField()
+    submission_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Assignment
@@ -103,33 +135,71 @@ class AssignmentSerializer(serializers.ModelSerializer):
             'category',
             'attachment',
             'attachment_name',
+            'is_group',
+            'max_group_size',
+            'submission_count',
             'created_at',
-            'updated_at'
+            'updated_at',
+            'has_report'
         ]
         read_only_fields = ['teacher', 'created_at', 'updated_at']
 
     def get_attachment_name(self, obj):
+        """
+        Extracts the base filename from the attachment path.
+        :param obj: The Assignment instance.
+        :return: String filename or None.
+        """
         if obj.attachment:
             import os
             return os.path.basename(obj.attachment.name)
         return None
 
+    def get_has_report(self, obj):
+        """
+        Checks if a teaching insight report is ready for the teacher.
+        :param obj: The Assignment instance.
+        :return: Boolean flag for frontend conditional rendering.
+        """
+        try:
+            return hasattr(obj, 'teaching_report') and obj.teaching_report.status == 'ready'
+        except:
+            return False
+
+    def get_submission_count(self, obj):
+        """
+        Calculates the number of unique students who have completed this task.
+        Logic: Filters for 'completed' status and counts distinct students
+        to avoid over-counting multiple attempts.
+        :param obj: The Assignment instance.
+        :return: Integer count of successful participants.
+        """
+        from .models import Submission
+        return Submission.objects.filter(assignment=obj, status='completed').values('student').distinct().count()
+
+
+class TeachingInsightReportSerializer(serializers.ModelSerializer):
+    """
+    Serializer for the TeachingInsightReport model.
+    """
+    class Meta:
+        model = TeachingInsightReport
+        fields = ['status', 'generated_at', 'stats_data', 'ai_insights']
+        read_only_fields = ['status', 'generated_at']
+
 
 # --- 9. Appeal Serializer ---
 class AppealSerializer(serializers.ModelSerializer):
     """
-    申诉详情序列化器 - 加强版
-    增加了跨表字段，确保老师端和学生端都能看到完整的上下文
+    Serializer for the Grade Appeal model.
     """
     status_display = serializers.CharField(source='get_status_display', read_only=True)
 
-    # 🚀 新增：跨表获取关联信息
     student_name = serializers.ReadOnlyField(source='evaluation.submission.student.username')
     student_id_num = serializers.ReadOnlyField(source='evaluation.submission.student.student_id_num')
     assignment_title = serializers.ReadOnlyField(source='evaluation.submission.assignment.title')
     original_score = serializers.ReadOnlyField(source='evaluation.total_score')
 
-    # 🚀 新增：老师信息（用于权限验证和显示）
     teacher_id = serializers.ReadOnlyField(source='evaluation.submission.assignment.teacher.id')
     teacher_name = serializers.ReadOnlyField(source='evaluation.submission.assignment.teacher.username')
 
@@ -157,6 +227,9 @@ class AppealSerializer(serializers.ModelSerializer):
 
 # --- 6. AI evaluation result serializer ---
 class AIEvaluationSimpleSerializer(serializers.ModelSerializer):
+    """
+
+    """
     ai_raw_feedback_data = serializers.SerializerMethodField()
     appeal = AppealSerializer(read_only=True)
 
@@ -169,6 +242,8 @@ class AIEvaluationSimpleSerializer(serializers.ModelSerializer):
             'feedback',
             'scores',
             'kp_scores',
+            'learning_resources',
+            'static_analysis',
             'is_published',
             'teacher_reviewed',
             'ai_raw_feedback',
@@ -179,6 +254,11 @@ class AIEvaluationSimpleSerializer(serializers.ModelSerializer):
         ]
 
     def get_ai_raw_feedback_data(self, obj):
+        """
+
+        :param obj:
+        :return:
+        """
         if not obj.ai_raw_feedback:
             return None
         try:
@@ -219,6 +299,8 @@ class SubmissionSerializer(serializers.ModelSerializer):
 
     active_appeal_data = serializers.SerializerMethodField()
 
+    group_name = serializers.ReadOnlyField(source='group.name')
+
     class Meta:
         model = Submission
         fields = [
@@ -226,6 +308,8 @@ class SubmissionSerializer(serializers.ModelSerializer):
             'student',
             'student_name',
             'assignment',
+            'group',
+            'group_name',
             'assignment_info',
             'ai_evaluation',
             'docker_report',
@@ -287,6 +371,7 @@ class SubmissionSerializer(serializers.ModelSerializer):
 
 class UserProfileSerializer(serializers.ModelSerializer):
     """A general serializer used for administrators to manage users and for users to view their personal profiles"""
+    password = serializers.CharField(write_only=True, required=False)
 
     class Meta:
         model = User
@@ -299,10 +384,13 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'student_id_num',
             'is_active',
             'class_name',
-            'date_joined'
+            'date_joined',
+            'approval_status',
+            'rejected_reason',
+            'password'
         ]
 
-        read_only_fields = ['id', 'date_joined']
+        read_only_fields = ['id', 'date_joined', 'approval_status', 'rejected_reason']
 
     def __init__(self, *args, **kwargs):
         super(UserProfileSerializer, self).__init__(*args, **kwargs)
@@ -313,6 +401,15 @@ class UserProfileSerializer(serializers.ModelSerializer):
             self.fields['student_id_num'].read_only = True
             self.fields['is_active'].read_only = True
             self.fields['username'].read_only = True
+
+    def validate_password(self, value):
+        # 🚀 这里的 validate_password 会自动去 settings 查找 AUTH_PASSWORD_VALIDATORS
+        try:
+            validate_password(value)
+        except exceptions.ValidationError as e:
+            raise serializers.ValidationError(list(e.messages))
+        return value
+
 
 class ChangePasswordSerializer(serializers.Serializer):
     """
@@ -332,12 +429,50 @@ class ChangePasswordSerializer(serializers.Serializer):
 class SystemConfigurationSerializer(serializers.ModelSerializer):
     class Meta:
         model = SystemConfiguration
-        fields = ['deepseek_api_key', 'deepseek_base_url', 'deepseek_model_name']
+        fields = ['id', 'deepseek_api_key', 'deepseek_base_url', 'deepseek_model_name',
+                  'docker_mem_limit', 'docker_cpu_quota', 'docker_pids_limit', 'docker_timeout']
+        read_only_fields = ['id']
+
+    def validate_docker_mem_limit(self, value):
+        """验证内存限制格式：512m, 1g, 1024k"""
+        if not re.match(r'^\d+[kmg]?$', str(value).lower()):
+            raise serializers.ValidationError("内存限制格式无效。请使用数字加单位（如 '512m', '1g'）。")
+        return value
+
+    def validate_docker_cpu_quota(self, value):
+        """验证 CPU 配额：0.1核 - 4核"""
+        if value < 100000000:
+            raise serializers.ValidationError("CPU 配额过低，可能导致容器无法启动。")
+        if value > 4000000000:
+            raise serializers.ValidationError("CPU 配额超出系统预设的安全上限（最高 4 核）。")
+        return value
+
+    def validate_docker_pids_limit(self, value):
+        """🚀 新增：验证最大进程数"""
+        if value < 10 or value > 500:
+            raise serializers.ValidationError("最大进程数限制需在 10 到 500 之间。")
+        return value
+
+    def validate_docker_timeout(self, value):
+        """验证超时时间"""
+        try:
+            timeout_val = int(value)
+            if timeout_val < 5 or timeout_val > 300:
+                raise serializers.ValidationError("超时时间必须在 5 到 300 秒之间。")
+            return timeout_val
+        except (ValueError, TypeError):
+            raise serializers.ValidationError("超时时间必须是一个有效的整数。")
+
+    def validate_deepseek_api_key(self, value):
+        """验证 API Key 健壮性"""
+        if not value or len(value.strip()) < 10:
+            raise serializers.ValidationError("无效的 DeepSeek API Key。")
+        return value
 
 
 class NotificationConfigSerializer(serializers.ModelSerializer):
     class Meta:
         model = NotificationConfig
         fields = ['enable_report', 'remind_before_hours', 'subject_template']
-        read_only_fields = ['teacher']# 老师字段由后端自动绑定，不允许前端修改
+        read_only_fields = ['teacher']
 
