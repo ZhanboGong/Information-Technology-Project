@@ -3223,13 +3223,20 @@ class AdminUserManagementViewSet(viewsets.ModelViewSet):
 
 
 class AdminSystemHealthView(APIView):
-    """系统健康面板：Docker 容器资源 + Redis 缓存统计"""
+    """
+    System Health Dashboard: Monitors Docker container resources and Redis cache performance.
+
+    Responsibilities:
+    1. Container Orchestration Visibility: Fetches CPU and Memory metrics directly from Docker.
+    2. Cache Diagnostics: Evaluates Redis hit rates and memory footprint.
+    3. Operational Intelligence: Provides status checks to ensure background services (like Celery workers) are running.
+    """
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     def get(self, request):
         import redis as redis_lib
 
-        # 1. Docker 容器资源
+        # 1. Docker Container Resources
         docker_stats = []
         try:
             import docker
@@ -3269,7 +3276,7 @@ class AdminSystemHealthView(APIView):
         except Exception as e:
             docker_stats = [{'error': str(e)}]
 
-        # 2. Redis 缓存统计
+        # 2. Redis cache statistics
         redis_stats = {'status': 'offline'}
         try:
             r = redis_lib.Redis(host='127.0.0.1', port=6379, db=0, socket_timeout=2)
