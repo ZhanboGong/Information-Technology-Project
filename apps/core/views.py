@@ -3318,10 +3318,10 @@ class SystemMonitorView(APIView):
     def get(self, request):
         import redis as redis_lib
 
-        # 1. 检测真实服务状态
+        # 1. Detecting the true service state
         nodes = []
 
-        # Core API Server: 检测自身进程
+        # Core API Server: Detecting own processes
         nodes.append({
             'name': 'Core API Server',
             'status': 'Online',
@@ -3329,7 +3329,7 @@ class SystemMonitorView(APIView):
             'desc': 'Django REST Framework'
         })
 
-        # Redis Broker: 尝试 ping
+        # Redis Broker: Try ping
         try:
             r = redis_lib.Redis(host='127.0.0.1', port=6379, db=0, socket_timeout=2)
             r.ping()
@@ -3347,7 +3347,7 @@ class SystemMonitorView(APIView):
                 'desc': 'Connection Failed'
             })
 
-        # Docker Worker: 检查是否有 grading 容器在运行
+        # Docker Worker: Check if any grading containers are running
         try:
             import docker
             client = docker.from_env()
@@ -3492,13 +3492,19 @@ class NotificationConfigViewSet(viewsets.ModelViewSet):
 
 class DockerManagementViewSet(viewsets.ViewSet):
     """
-    管理员端：Docker 沙箱基础设施监控与动态配置中心
+    Administrator Panel: Infrastructure monitoring and dynamic configuration for Docker sandboxes.
+    Key Features:
+    1. Real-time Monitoring: Tracks container lifecycle states and engine resource utilization.
+    2. Dynamic Policy Management: Updates sandbox resource limits without requiring a restart.
+    3. Self-Healing/Maintenance: Prunes defunct resources to maintain disk health.
     """
-    # 建议此处使用你自定义的 IsAdminUser 权限，目前先用 IsAuthenticated 保证安全
     permission_classes = [IsAdminUser]
 
     def _get_client(self):
-        """内部工具方法：安全获取 Docker 客户端连接"""
+        """
+        Internal utility: Establishes a secure connection to the local Docker daemon.
+        :return: DockerClient instance or None if the engine is unreachable.
+        """
         try:
             return docker.from_env()
         except Exception as e:
@@ -3508,15 +3514,15 @@ class DockerManagementViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'], url_path='status')
     def get_status(self, request):
         """
-        [监测功能] 获取 Docker 引擎的实时负载与容器状态
+        [Monitoring] Retrieves real-time load and container status from the Docker engine.
         """
         client = self._get_client()
         if not client:
-            return Response({"error": "无法连接到 Docker 引擎，请检查服务是否启动"}, status=500)
+            return Response({"error": "Unable to connect to Docker engine. Is the service running?"}, status=500)
 
         try:
             info = client.info()
-            # 获取当前正在运行的容器（用于识别系统负载）
+            # Get the currently running container (to identify system load)
             running_containers = client.containers.list(filters={"status": "running"})
 
             return Response({
@@ -3535,12 +3541,12 @@ class DockerManagementViewSet(viewsets.ViewSet):
                 }
             })
         except Exception as e:
-            return Response({"error": f"获取状态失败: {str(e)}"}, status=500)
+            return Response({"error": f"Failed to retrieve engine status: {str(e)}"}, status=500)
 
     @action(detail=False, methods=['get', 'post'], url_path='config')
     def manage_config(self, request):
         """
-        [管理功能] 动态读写 DockerRunner 的资源限额配置
+        [Management] Dynamically reads or updates DockerRunner resource constraints.
         """
         # 利用你 model 里的 get_config() 自动获取单例配置
         config = SystemConfiguration.get_config()
@@ -3550,12 +3556,11 @@ class DockerManagementViewSet(viewsets.ViewSet):
             return Response(serializer.data)
 
         elif request.method == 'POST':
-            # 使用 partial=True 支持只修改 Docker 部分字段
             serializer = SystemConfigurationSerializer(config, data=request.data, partial=True)
             if serializer.is_valid():
                 serializer.save()
                 return Response({
-                    "message": "Docker 运行策略已成功更新并刷新缓存",
+                    "message": "Docker execution policy updated and cache refreshed.",
                     "data": serializer.data
                 })
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -3563,11 +3568,11 @@ class DockerManagementViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['post'], url_path='cleanup')
     def cleanup_resources(self, request):
         """
-        [自愈功能] 一键清理所有已停止的容器，防止磁盘被大量无用沙箱堆满
+        [Self-Healing] Prunes all stopped containers to reclaim disk space.
         """
         client = self._get_client()
         if not client:
-            return Response({"error": "Docker 引擎不可用"}, status=500)
+            return Response({"error": "Docker engine unreachable."}, status=500)
 
         try:
             pruned = client.containers.prune()
@@ -3575,8 +3580,8 @@ class DockerManagementViewSet(viewsets.ViewSet):
             return Response({
                 "deleted_count": len(deleted_list) if deleted_list is not None else 0,
                 "space_reclaimed": pruned.get('SpaceReclaimed', 0),
-                "message": "清理完成"
+                "message": "Cleanup completed successfully."
             })
         except Exception as e:
-            return Response({"error": f"清理失败: {str(e)}"}, status=500)
+            return Response({"error": f"Cleanup failed:{str(e)}"}, status=500)
 
