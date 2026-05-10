@@ -1747,7 +1747,19 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='plagiarism-diff')
     def plagiarism_diff(self, request, pk=None):
-        """代理获取 MOSS 对比详情页（避免前端 CORS 问题）"""
+        """
+        Fetches and parses side-by-side code comparisons from remote MOSS reports.
+        Business Logic:
+        1. Remote Scaping: Retrieves raw HTML frames from the Stanford MOSS server.
+        2. Snippet Extraction: Isolates source code contained within <PRE> tags.
+        3. Match Highlighting: Parses <FONT> color tags used by MOSS to identify specific
+           lines of code that are structurally identical between two submissions.
+        4. Sanitization: Cleans HTML entities and tags to provide a safe, JSON-ready
+        array of code lines for the frontend diff viewer.
+        :param request: Request containing url_a and url_b (MOSS match frames).
+        :param pk: Primary key of the assignment.
+        :return: Response containing filenames and line-by-line code with 'matched' flags.
+        """
         url_a = request.data.get('url_a', '')
         url_b = request.data.get('url_b', '')
 
