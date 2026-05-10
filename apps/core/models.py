@@ -450,19 +450,27 @@ class SystemConfiguration(models.Model):
 
 
 class Appeal(models.Model):
+    """
+    Grade Appeal Model.
+    Responsibilities:
+    1. Dispute Management: Tracks the lifecycle of a student's grade contestation.
+    2. Automated Screening: Stores AI-generated preliminary audits (ai_judgment) to filter non-substantive appeals.
+    3. Human Arbitration: Provides fields for teacher review and final score adjustments.
+    4. Data Integrity: Uses a One-to-One link to ensure each evaluation has only one active dispute.
+    """
     STATUS_CHOICES = (
         ('pending_ai', 'AI 审核中'),
         ('rejected_by_ai', 'AI 驳回'),
         ('pending_teacher', '待教师复核'),
         ('completed', '处理完成')
     )
-    # 关联评分记录
+    # Associated score record
     evaluation = models.OneToOneField('AIEvaluation', on_delete=models.CASCADE, related_name='appeal')
-    # 学生诉求
+    # Student appeal
     student_reason = models.TextField(verbose_name="学生申诉理由")
-    # AI 初审意见
+    # AI first review opinion
     ai_judgment = models.TextField(null=True, blank=True, verbose_name="AI 初审意见")
-    # 最终处理状态
+    # Final processing state
     adjusted_score = models.DecimalField(
         max_digits=5,
         decimal_places=2,
@@ -471,7 +479,7 @@ class Appeal(models.Model):
         verbose_name="调整后分数"
     )
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending_ai')
-    # 教师备注
+    # Teacher's Notes
     teacher_remark = models.TextField(null=True, blank=True, verbose_name="教师复核备注")
     updated_at = models.DateTimeField(auto_now=True)
     created_at = models.DateTimeField(auto_now_add=True)
