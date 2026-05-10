@@ -92,7 +92,15 @@ class EmailVerificationToken(models.Model):
 @receiver(post_save, sender=User)
 def create_default_notification_config(sender, instance, created, **kwargs):
     """
-    当新用户被创建，且角色是老师时，自动生成全局通知配置
+    Signal receiver that auto-generates notification settings for new teachers.
+
+    Responsibilities:
+    1. Lifecycle Trigger: Executes immediately after a User record is persisted.
+    2. Role Filtering: Only applies to users with the 'teacher' role.
+    3. Idempotency: Uses 'get_or_create' to ensure settings aren't duplicated
+       during profile updates.
+    4. Template Provisioning: Injects a default email subject template for
+       immediate report readiness.
     """
     if created and instance.role == 'teacher':
         NotificationConfig.objects.get_or_create(
