@@ -299,11 +299,15 @@ class AIEvaluation(models.Model):
     )
 
 
-# 9. Teaching Insight Report Table (New)
+# 9. Teaching Insight Report Table
 class TeachingInsightReport(models.Model):
     """
-    教情诊断报告模型
-    与 Assignment 一对一绑定，用于缓存 AI 对全班作业表现的深度分析结果。
+    Pedagogical Diagnostic Report Model.
+
+    Responsibilities:
+    1. Knowledge Aggregation: Caches deep AI analysis of class-wide performance.
+    2. Data Flexibility: Stores semi-structured statistical and qualitative data via JSON.
+    3. Performance Optimization: Prevents expensive AI re-computation by persisting insights.
     """
     STATUS_CHOICES = (
         ('pending', '分析中'),
@@ -311,7 +315,6 @@ class TeachingInsightReport(models.Model):
         ('error', '失败')
     )
 
-    # 建立一对一关联，related_name 方便通过 assignment.teaching_report 访问
     assignment = models.OneToOneField(
         'Assignment',
         on_delete=models.CASCADE,
@@ -319,10 +322,10 @@ class TeachingInsightReport(models.Model):
         verbose_name="关联作业"
     )
 
-    # 存储统计指标 (平均分、人数、知识点得分统计等)
+    # Store statistical indicators (average score, number of people, knowledge point score statistics, etc.)
     stats_data = models.JSONField(default=dict, verbose_name="统计指标数据")
 
-    # 存储 AI 生成的分析报告 (analysis, strengths, weaknesses, suggestions)
+    # Store AI-generated analysis reports (analysis, strengths, weaknesses, suggestions)
     ai_insights = models.JSONField(default=dict, verbose_name="AI 诊断结果")
 
     status = models.CharField(
@@ -345,7 +348,12 @@ class TeachingInsightReport(models.Model):
 
 class PlagiarismReport(models.Model):
     """
-    代码查重报告：存储 MOSS 或本地检测的结果
+    Plagiarism Detection Report Model.
+
+    Responsibilities:
+    1. Result Archiving: Stores outcomes from both remote (MOSS) and local similarity engines.
+    2. Workflow Tracking: Manages the lifecycle of an audit from 'pending' to 'completed'.
+    3. Evidence Storage: Holds structured match data (student pairs + percentages) for UI rendering.
     """
     assignment = models.ForeignKey('Assignment', on_delete=models.CASCADE, related_name='plagiarism_reports')
 
