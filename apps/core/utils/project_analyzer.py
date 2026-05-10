@@ -34,7 +34,16 @@ class ProjectAnalyzer:
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(extract_path)
 
-            # --- Recursive tiling: Make sure the src directory is on the first level of extract_path ---
+            # Clean up junk files and directories
+            skip_exts = ('.class', '.jar', '.pyc', '.exe', '.dll', '.o', '.out')
+            skip_dirs = {'__pycache__', '.git', 'node_modules', '.idea', 'venv', '__MACOSX'}
+            for root, dirs, files in os.walk(extract_path):
+                dirs[:] = [d for d in dirs if d not in skip_dirs]
+                for f in files:
+                    if any(f.endswith(ext) for ext in skip_exts):
+                        os.remove(os.path.join(root, f))
+
+            # Recursive tiling: Make sure the src directory is on the first level of extract_path
             while True:
                 content = [f for f in os.listdir(extract_path) if
                            not f.startswith('__MACOSX') and not f.startswith('.')]
@@ -61,6 +70,7 @@ class ProjectAnalyzer:
         :return: List of all candidate entry file relative paths found.
         """
         candidates = []
+        all_py_files = []
         py_entry_patterns = [r'if\s+__name__\s*==\s*["\']__main__["\']\s*:']
         java_main_pattern = r'public\s+static\s+void\s+main\s*\('
 
@@ -69,19 +79,32 @@ class ProjectAnalyzer:
                 path = os.path.join(root, file)
                 rel_path = os.path.relpath(path, project_path).replace("\\", "/")
                 if file.endswith('.py'):
+                    all_py_files.append(rel_path)
                     try:
                         with open(path, 'r', encoding='utf-8', errors='ignore') as f:
                             if any(re.search(p, f.read()) for p in py_entry_patterns):
                                 candidates.append(rel_path)
-                    except:
+                    except Exception:
                         pass
                 elif file.endswith('.java'):
                     try:
                         with open(path, 'r', encoding='utf-8', errors='ignore') as f:
                             if re.search(java_main_pattern, f.read()):
                                 candidates.append(rel_path)
-                    except:
+                    except Exception:
                         pass
+
+        # Python's fail-safe strategy: If you can't find __main__, choose a common entry point filename
+        if not candidates and all_py_files:
+            priority_names = ['main.py', 'app.py', 'run.py', 'manage.py', 'server.py', 'cli.py']
+            for name in priority_names:
+                for f in all_py_files:
+                    if os.path.basename(f) == name:
+                        candidates.append(f)
+                        break
+                if candidates:
+                    break
+
         return list(set(candidates))
 
     def ai_assist_detect(self, project_path, candidates, task_context=None):
