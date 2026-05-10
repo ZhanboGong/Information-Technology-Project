@@ -18,7 +18,8 @@ from .views import (
     AdminDashboardStatsView,
     AdminUserManagementViewSet,
     SystemMonitorView,
-    AdminSystemLogView, NotificationConfigViewSet
+    AdminSystemLogView, NotificationConfigViewSet, DockerManagementViewSet,
+    register_teacher, verify_email, AdminAIUsageStatsView, AdminSystemHealthView, AdminKnowledgePointViewSet
 )
 from rest_framework_simplejwt.views import TokenRefreshView
 
@@ -51,7 +52,11 @@ router.register(r'admin/system-config', SystemConfigViewSet, basename='admin-con
 
 router.register(r'admin/users', AdminUserManagementViewSet, basename='admin-users')
 
+router.register(r'admin/knowledge-points', AdminKnowledgePointViewSet, basename='admin-kp')
+
 router.register(r'notification-config', NotificationConfigViewSet, basename='notification-config')
+
+router.register(r'docker', DockerManagementViewSet, basename='docker')
 
 # define the final list of URL mappings
 urlpatterns = [
@@ -72,5 +77,13 @@ urlpatterns = [
 
     path('admin/dashboard-stats/', AdminDashboardStatsView.as_view(), name='admin-dashboard-stats'),
 
+    path('admin/system-health/', AdminSystemHealthView.as_view(), name='admin-system-health'),
+
+    path('admin/ai-usage/', AdminAIUsageStatsView.as_view(), name='admin-ai-usage'),
+
     path('admin/system-logs/', AdminSystemLogView.as_view(), name='admin-system-logs'),
+
+    path('register-teacher/', register_teacher),
+
+    path('verify-email/', verify_email),
 ]
