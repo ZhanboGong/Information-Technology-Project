@@ -2999,7 +2999,7 @@ class AdminDashboardStatsView(APIView):
         logs = []
         for sub in recent_submissions:
             logs.append({
-                "action": f"学生 {sub.student.username} 提交了作业: {sub.assignment.title}",
+                "action": f"Student {sub.student.username} submitted assignment: {sub.assignment.title}",
                 "time": sub.created_at,
                 "color": "bg-blue-500" if sub.status == 'completed' else "bg-amber-500"
             })
@@ -3127,43 +3127,48 @@ class AdminUserManagementViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], url_path='approve')
     def approve_teacher(self, request, pk=None):
         """
-        管理员：批准教师注册并发送账号通知邮件
+        Administrator: Approves teacher registration and sends account activation email.
+        Business Logic:
+        1. Role Validation: Ensures the approval flow is only applied to 'teacher' accounts.
+        2. State Verification: Checks if the account is already active to prevent redundant processing.
+        3. Atomic Activation: Updates 'approval_status' and sets 'is_active' to True in one transaction.
+        4. Notification: Dispatches a welcome email with login instructions.
+        5. Auditing: Records the administrative action in the system logs.
         """
         user = self.get_object()
 
         if user.role != 'teacher':
-            return Response({"error": "该用户不是教师，无需审批流程"}, status=400)
+            return Response({"error": "This user is not a teacher and does not need the approval process"}, status=400)
 
         if user.approval_status == 'approved':
-            return Response({"message": "该账号已经是激活状态"}, status=200)
+            return Response({"message": "The account is already active"}, status=200)
 
-        # 1. 执行审批通过逻辑
+        # 1. Execute Approval Logic
         with transaction.atomic():
             user.approval_status = 'approved'
-            user.is_active = True  # 🚀 关键：激活账号，允许登录
+            user.is_active = True
             user.save()
 
-        # 2. 准备邮件内容
-        # 注意：Django 数据库不存储明文密码。
-        # 如果老师是自己注册的，他应该知道密码。但为了友好，我们提醒他使用注册时设置的密码。
-        subject = "【系统通知】您的教师账号已审核通过"
+        # 2. Prepare Notification Content
+        subject = "[System Notification] Your teacher account has been approved"
         message = f"""
-    尊敬的 {user.username} 老师：
+    Dear {user.username},
 
-    您的教师账号申请已通过管理员审核！现在您可以登录系统开展教学工作。
+    Your teacher account application has been reviewed and approved by the administrator! 
+    You can now log in to the system to begin your instructional work.
 
-    【账号信息】
-    - 登录账号：{user.username}
-    - 登录密码：您注册时设置的密码
-    - 登录地址：{settings.FRONTEND_URL}/login
+    [Account Information]
+    - Username: {user.username}
+    - Password: The password you set during registration
+    - Login URL: {settings.FRONTEND_URL}/login
 
-    如果您忘记了密码，请联系管理员重置。
+    If you have forgotten your password, please contact the administrator for a reset.
 
-    祝您使用愉快！
-    智能编程教育系统团队
+    Best regards,
+    The Intelligent Programming Education Team
         """
 
-        # 3. 发送邮件
+        # 3. Sending an email
         try:
             send_mail(
                 subject,
@@ -3173,14 +3178,13 @@ class AdminUserManagementViewSet(viewsets.ModelViewSet):
                 fail_silently=False
             )
 
-            # 记录操作日志
+            # Logging operations
             log_action(request.user, "APPROVE_TEACHER", "User", user.id, f"Approved teacher: {user.username}")
 
-            return Response({"message": f"教师 {user.username} 审核已通过，通知邮件已发出。"})
+            return Response({"message": f"Teacher {user.username} approved. Notification email sent."})
         except Exception as e:
-            # 即使邮件发送失败，账号其实已经激活了，这里报个警即可
             return Response({
-                "message": f"账号 {user.username} 已激活，但邮件通知发送失败。",
+                "message": f"Account {user.username} activated, but the notification email failed to send.",
                 "error": str(e)
             }, status=200)
 
