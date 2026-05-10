@@ -487,8 +487,12 @@ class Appeal(models.Model):
 
 class NotificationConfig(models.Model):
     """
-    老师的系统全局通知偏好。
-    每个老师 ID 仅对应一条记录，实现“一劳永逸”的设置。
+    Global Notification Preferences for Teachers.
+
+    Responsibilities:
+    1. Preference Persistence: Stores "Set and Forget" settings for automated reports.
+    2. Timing Orchestration: Defines the lead time for report generation.
+    3. Template Customization: Manages dynamic subject line formatting for emails.
     """
     teacher = models.OneToOneField(
         'User',
@@ -498,20 +502,20 @@ class NotificationConfig(models.Model):
         verbose_name="所属教师"
     )
 
-    # 全局开关：老师是否想接收截止报告
+    # Global switch: Whether the teacher wants to receive the deadline report
     enable_report = models.BooleanField(
         default=True,
         verbose_name="开启截止报告通知"
     )
 
-    # 全局偏移：默认在截止前多久发送
+    # Global offset: Default how long before the deadline to send
     remind_before_hours = models.IntegerField(
         default=0,
         verbose_name="提醒偏移小时数",
         help_text="0为截止时发送，正数代表提前发送"
     )
 
-    # 全局模板：邮件标题长什么样
+    # Global template: What does the email subject look like
     subject_template = models.CharField(
         max_length=255,
         default="【系统通知】作业截止统计报告：《{title}》",
