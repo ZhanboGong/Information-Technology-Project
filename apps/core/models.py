@@ -380,6 +380,14 @@ class PlagiarismReport(models.Model):
 
 # 8. System Configuration
 class SystemConfiguration(models.Model):
+    """
+    Global System Settings (Singleton).
+
+    Responsibilities:
+    1. AI Orchestration: Manages credentials and endpoints for LLM services (DeepSeek).
+    2. Sandbox Security: Defines strict hardware limits (CPU, RAM, PIDs) for Docker containers.
+    3. Performance Optimization: Uses a cache-aside pattern to reduce database load.
+    """
     deepseek_api_key = models.CharField(max_length=255, default="sk-f532188d5dd5436a920de5b44b1f9596", verbose_name="DeepSeek API Key", blank=True)
     deepseek_base_url = models.URLField(default="https://api.deepseek.com", verbose_name="DeepSeek Base URL")
     deepseek_model_name = models.CharField(max_length=100, default="deepseek-chat", verbose_name="模型名称")
@@ -415,6 +423,10 @@ class SystemConfiguration(models.Model):
         verbose_name_plural = "系统全局配置"
 
     def save(self, *args, **kwargs):
+        """
+        Enforces the Singleton pattern by hardcoding the primary key.
+        Invalidates the 'system_config' cache upon any update.
+        """
         self.pk = 1
         super().save(*args, **kwargs)
         cache.delete('system_config')
@@ -422,6 +434,11 @@ class SystemConfiguration(models.Model):
 
     @classmethod
     def get_config(cls):
+        """
+        Retrieves the global configuration instance.
+        Implements a cache-first strategy with a 10-minute TTL.
+        :return: The existing configuration instance (creates one if none exists).
+        """
         config = cache.get('system_config')
         if not config:
             config, created = cls.objects.get_or_create(pk=1)
@@ -432,7 +449,6 @@ class SystemConfiguration(models.Model):
         return "系统全局配置"
 
 
-# Sprint 2
 class Appeal(models.Model):
     STATUS_CHOICES = (
         ('pending_ai', 'AI 审核中'),
