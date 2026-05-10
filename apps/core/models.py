@@ -58,11 +58,15 @@ class User(AbstractUser):
 
 class EmailVerificationToken(models.Model):
     """
-    用于教师注册时的邮箱验证 Token
+    Model for storing email verification tokens during teacher registration.
+
+    Responsibilities:
+    1. Identity Proof: Links a unique, short-lived hash to a specific User instance.
+    2. Lifecycle Management: Defines a 24-hour expiration window for the verification process.
+    3. Cleanup Support: Uses CASCADE delete so that removing a user automatically purges their token.
     """
-    # 建立与 User 的一对一关联
     user = models.OneToOneField(
-        settings.AUTH_USER_MODEL,  # 推荐使用 settings 引用，更健壮
+        settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name='email_token'
     )
@@ -70,11 +74,14 @@ class EmailVerificationToken(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     def is_valid(self):
-        # 别忘了导入 timezone 和 timedelta
+        """
+        Validates if the token has expired based on its creation timestamp.
+        :return: True if current time is within 24 hours of generation, False otherwise.
+        """
         return timezone.now() < self.created_at + timedelta(hours=24)
 
     class Meta:
-        db_table = 'auth_email_verification_token'  # 手动指定表名让数据库更整洁
+        db_table = 'auth_email_verification_token'
         verbose_name = "邮箱验证Token"
         verbose_name_plural = verbose_name
 
