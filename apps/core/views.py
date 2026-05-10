@@ -2880,7 +2880,14 @@ class AdminKnowledgePointViewSet(viewsets.ModelViewSet):
 
 
 class AdminAIUsageStatsView(APIView):
-    """AI 用量统计面板：Token 消耗、响应时间、错误率、接口调用分布"""
+    """
+    AI Usage Analytics Dashboard: Monitors Token consumption, latency, and reliability.
+    Responsibilities:
+    1. Cost Tracking: Aggregates total, prompt, and completion token usage.
+    2. Performance Monitoring: Calculates average response times across different AI features.
+    3. Health Checks: Identifies error rates and status code distributions (4xx/5xx).
+    4. Trend Analysis: Provides time-series data for daily usage patterns.
+    """
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     def get(self, request):
@@ -2894,7 +2901,7 @@ class AdminAIUsageStatsView(APIView):
         since = timezone.now() - timedelta(days=days)
         logs = AIServiceLog.objects.filter(created_at__gte=since)
 
-        # 1. 总量统计
+        # 1. Total amount statistics
         totals = logs.aggregate(
             total_tokens=Sum('total_tokens'),
             prompt_tokens=Sum('prompt_tokens'),
@@ -2904,7 +2911,7 @@ class AdminAIUsageStatsView(APIView):
             error_count=Count('id', filter=Q(status_code__gte=400))
         )
 
-        # 2. 按天趋势（Token 消耗 + 调用次数）
+        # 2. Daily trend (Token consumption + number of calls)
         daily_trend = (
             logs.annotate(day=TruncDate('created_at'))
             .values('day')
@@ -2925,14 +2932,14 @@ class AdminAIUsageStatsView(APIView):
             for item in daily_trend
         ]
 
-        # 3. 按接口分布（饼图数据）
+        # 3. Distribution by interface (pie chart data)
         endpoint_dist = (
             logs.values('endpoint')
             .annotate(count=Count('id'), tokens=Sum('total_tokens'))
             .order_by('-count')
         )
 
-        # 4. 按接口平均响应时间
+        # 4. Average response time by interface
         endpoint_latency = (
             logs.values('endpoint')
             .annotate(avg_time=Avg('response_time'))
