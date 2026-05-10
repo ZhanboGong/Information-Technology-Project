@@ -1,5 +1,5 @@
 from datetime import timedelta
-
+from django.utils import timezone
 from django.db import models
 from django.db.models.signals import post_save
 from django.dispatch import receiver
@@ -10,7 +10,10 @@ import random
 import string
 
 def generate_invite_code():
-    # Produces a combination of six capital letters and numbers
+    """
+    Generates a unique, human-readable invitation string for course enrollment.
+    :return: A 6-character alphanumeric string (e.g., 'A7K9X2').
+    """
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
 
 
@@ -25,12 +28,58 @@ class User(AbstractUser):
         ('teacher', '教师'),
         ('student', '学生')
     )
+
+    APPROVAL_CHOICES = [
+        ('pending_email', '待验证邮箱'),
+        ('pending_approval', '待管理员审核'),
+        ('approved', '审核通过'),
+        ('rejected', '已驳回')
+    ]
+
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='student', verbose_name="角色")
     student_id_num = models.CharField(max_length=50, null=True, blank=True, verbose_name="学号/工号")
     class_name = models.CharField(max_length=30, db_column='class', null=True, blank=True, verbose_name="班级")
 
+    approval_status = models.CharField(
+        max_length=20,
+        choices=APPROVAL_CHOICES,
+        default='approved',
+        verbose_name="审核状态"
+    )
+    rejected_reason = models.TextField(
+        null=True,
+        blank=True,
+        verbose_name="驳回原因"
+    )
+
     def __str__(self):
-        return f"{self.username} ({self.get_role_display()})"
+        return f"{self.username} ({self.get_role_display()}) - {self.get_approval_status_display()}"
+
+
+class EmailVerificationToken(models.Model):
+    """
+    用于教师注册时的邮箱验证 Token
+    """
+    # 建立与 User 的一对一关联
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,  # 推荐使用 settings 引用，更健壮
+        on_delete=models.CASCADE,
+        related_name='email_token'
+    )
+    token = models.CharField(max_length=64, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def is_valid(self):
+        # 别忘了导入 timezone 和 timedelta
+        return timezone.now() < self.created_at + timedelta(hours=24)
+
+    class Meta:
+        db_table = 'auth_email_verification_token'  # 手动指定表名让数据库更整洁
+        verbose_name = "邮箱验证Token"
+        verbose_name_plural = verbose_name
+
+    def __str__(self):
+        return f"Token for {self.user.username}"
 
 
 @receiver(post_save, sender=User)
@@ -95,6 +144,27 @@ class KnowledgePoint(models.Model):
         return f"[{self.category}] {self.name}"
 
 
+class Group(models.Model):
+    name = models.CharField(max_length=100, verbose_name="小组名称")
+    course = models.ForeignKey('Course', on_delete=models.CASCADE, related_name='groups', verbose_name="所属课程")
+    leader = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='led_groups', verbose_name="组长")
+    members = models.ManyToManyField(settings.AUTH_USER_MODEL, related_name='joined_groups', verbose_name="小组成员")
+    invite_code = models.CharField(
+        max_length=10,
+        unique=True,
+        default=generate_invite_code,
+        verbose_name="小组邀请码"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "小组"
+        verbose_name_plural = verbose_name
+
+    def __str__(self):
+        return f"{self.name} ({self.course.name})"
+
+
 # 4. Assessment Table
 class Assignment(models.Model):
     """
@@ -128,6 +198,8 @@ class Assignment(models.Model):
         blank=True,
         verbose_name="作业附件"
     )
+    is_group = models.BooleanField(default=False, verbose_name="是否为小组作业")
+    max_group_size = models.PositiveIntegerField(default=5, verbose_name="小组人数上限")
 
     def __str__(self):
         return self.title
@@ -149,6 +221,15 @@ class Submission(models.Model):
     attempt_number = models.IntegerField(default=1)
     final_score = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    group = models.ForeignKey(
+        'Group',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='submissions',
+        verbose_name="关联小组"
+    )
 
 
 # 6. Docker Report Table
@@ -181,7 +262,9 @@ class AIEvaluation(models.Model):
     is_published = models.BooleanField(default=False)
     teacher_reviewed = models.BooleanField(default=False)
     raw_response = models.TextField(null=True, blank=True)
+    static_analysis = models.JSONField(null=True, blank=True, verbose_name="静态分析数据")
     created_at = models.DateTimeField(auto_now_add=True)
+    learning_resources = models.JSONField(null=True, blank=True, verbose_name="学习资源推荐")
 
     # Sprint 2
     plagiarism_info = models.JSONField(
@@ -192,12 +275,106 @@ class AIEvaluation(models.Model):
     )
 
 
+# 9. Teaching Insight Report Table (New)
+class TeachingInsightReport(models.Model):
+    """
+    教情诊断报告模型
+    与 Assignment 一对一绑定，用于缓存 AI 对全班作业表现的深度分析结果。
+    """
+    STATUS_CHOICES = (
+        ('pending', '分析中'),
+        ('ready', '就绪'),
+        ('error', '失败')
+    )
+
+    # 建立一对一关联，related_name 方便通过 assignment.teaching_report 访问
+    assignment = models.OneToOneField(
+        'Assignment',
+        on_delete=models.CASCADE,
+        related_name='teaching_report',
+        verbose_name="关联作业"
+    )
+
+    # 存储统计指标 (平均分、人数、知识点得分统计等)
+    stats_data = models.JSONField(default=dict, verbose_name="统计指标数据")
+
+    # 存储 AI 生成的分析报告 (analysis, strengths, weaknesses, suggestions)
+    ai_insights = models.JSONField(default=dict, verbose_name="AI 诊断结果")
+
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='ready',
+        verbose_name="生成状态"
+    )
+
+    generated_at = models.DateTimeField(auto_now=True, verbose_name="生成时间")
+
+    class Meta:
+        db_table = 'teaching_insight_report'
+        verbose_name = '教情诊断报告'
+        verbose_name_plural = verbose_name
+
+    def __str__(self):
+        return f"Report for: {self.assignment.title}"
+
+
+class PlagiarismReport(models.Model):
+    """
+    代码查重报告：存储 MOSS 或本地检测的结果
+    """
+    assignment = models.ForeignKey('Assignment', on_delete=models.CASCADE, related_name='plagiarism_reports')
+
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('completed', 'Completed'),
+        ('error', 'Error'),
+    ]
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    mode = models.CharField(max_length=20, null=True, blank=True, help_text="moss or local")
+    report_url = models.URLField(null=True, blank=True, help_text="MOSS report URL")
+    matches = models.JSONField(default=list, blank=True, help_text="Local similarity results")
+    file_count = models.IntegerField(default=0)
+    error_message = models.TextField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Plagiarism Report: {self.assignment.title} ({self.status})"
+
+
 # 8. System Configuration
 class SystemConfiguration(models.Model):
     deepseek_api_key = models.CharField(max_length=255, default="sk-f532188d5dd5436a920de5b44b1f9596", verbose_name="DeepSeek API Key", blank=True)
     deepseek_base_url = models.URLField(default="https://api.deepseek.com", verbose_name="DeepSeek Base URL")
     deepseek_model_name = models.CharField(max_length=100, default="deepseek-chat", verbose_name="模型名称")
 
+
+    # Docker
+    docker_mem_limit = models.CharField(
+        max_length=20,
+        default="512m",
+        verbose_name="容器内存限制",
+        help_text="例如: 256m, 512m, 1g"
+    )
+    docker_cpu_quota = models.BigIntegerField(
+        default=1000000000,
+        verbose_name="CPU配额(Nano)",
+        help_text="1,000,000,000 代表 1 核 CPU"
+    )
+    docker_pids_limit = models.IntegerField(
+        default=50,
+        verbose_name="最大进程数限制",
+        help_text="防止 Fork 炸弹攻击"
+    )
+    docker_timeout = models.IntegerField(
+        default=30,
+        verbose_name="容器运行超时(秒)",
+        help_text="代码执行的最长时间"
+    )
     # max_tokens = models.IntegerField(default=2000)
     # temperature = models.FloatField(default=0.7)
 
@@ -290,3 +467,17 @@ class NotificationConfig(models.Model):
 
     def __str__(self):
         return f"{self.teacher.username} 的系统设置"
+
+
+class SystemOperationLog(models.Model):
+    user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, verbose_name="操作人")
+    action = models.CharField(max_length=100, verbose_name="操作行为")
+    target_type = models.CharField(max_length=50, verbose_name="目标类型") # 如 Assignment, User, Config
+    target_id = models.CharField(max_length=50, null=True, blank=True, verbose_name="目标ID")
+    detail = models.TextField(verbose_name="详情描述")
+    ip_address = models.GenericIPAddressField(null=True, blank=True, verbose_name="IP地址")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="操作时间")
+
+    class Meta:
+        ordering = ['-created_at']
+
