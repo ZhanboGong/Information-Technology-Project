@@ -1716,7 +1716,17 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'], url_path='plagiarism-results')
     def plagiarism_results(self, request, pk=None):
-        """获取该作业的所有查重报告"""
+        """
+        Retrieves the history and detailed findings of plagiarism audits for an assignment.
+        Business Logic:
+        1. Historical Lookup: Fetches all plagiarism reports associated with the assignment.
+        2. Data Packaging: Serializes report metadata, including similarity matches and
+           external MOSS report links.
+        3. Error Transparency: Includes error messages if an audit failed (e.g., MOSS timeout).
+        :param request: The incoming HTTP GET request.
+        :param pk: Primary key of the assignment.
+        :return: List of report objects containing match data and status.
+        """
         assignment = self.get_object()
         reports = PlagiarismReport.objects.filter(assignment=assignment)
 
