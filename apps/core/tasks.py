@@ -96,44 +96,51 @@ def check_deadlines_and_send_reports():
 @shared_task(bind=True, max_retries=3)
 def send_assignment_deadline_report(self, assignment_id, subject_template=None):
     """
-    生成详细统计信息并发送给老师
-    Args:
-        assignment_id: 作业ID
-        subject_template: 可选，来自 NotificationConfig 的标题模板
+    Asynchronous task to send a statistical report email to the teacher after an assignment deadline.
+
+    Workflow:
+    1. Aggregates submission stats (total count, submission rate, and average score).
+    2. Identifies students who have not submitted.
+    3. Generates a snapshot of scores based on each student's highest attempt.
+    4. Marks the report as sent in the database.
+    :param self: Task instance for retries.
+    :param assignment_id: ID of the Assignment to report on.
+    :param subject_template: Optional string for custom email subjects (supports {title}).
+    :return:
     """
     try:
-        # 预加载关联数据以提升性能
+        # Preload related data to optimize performance and prevent N+1 queries
         from .models import Assignment, Submission
         assignment = Assignment.objects.select_related('teacher', 'course').get(id=assignment_id)
         teacher = assignment.teacher
 
         if not teacher.email:
-            print(f"跳过：老师 {teacher.username} 未设置邮箱")
+            print(f"Skip: Teacher {teacher.username} has no email set.")
             return
 
-        # 1. 基础数据统计
+        # 1. Basic data statistics
         all_students = assignment.course.students.all()
         total_count = all_students.count()
 
-        # 获取所有已完成提交的 QuerySet
+        # Get the QuerySet of all completed commits
         submitted_qs = Submission.objects.filter(assignment=assignment, status='completed')
         submitted_count = submitted_qs.values('student').distinct().count()
 
-        # 2. 计算平均分 (取每个学生的最高分进行平均)
+        # 2. Calculate the average score (take the highest score of each student and average it)
         avg_score = submitted_qs.values('student').annotate(
             best=Max('final_score')
         ).aggregate(average=Avg('best'))['average'] or 0
 
-        # 3. 未提交学生名单
+        # 3. Student list not submitted
         unsubmitted_students = all_students.exclude(
             id__in=Submission.objects.filter(
                 assignment=assignment, status='completed'
             ).values_list('student_id', flat=True)
         )
-        unsubmitted_list = [f"- {s.first_name or s.username} (学号: {s.student_id_num or '无'})" for s in
+        unsubmitted_list = [f"- {s.first_name or s.username} (ID: {s.student_id_num or 'N/A'})" for s in
                             unsubmitted_students]
 
-        # 4. 批量获取每个学生的最高分（一次查询）
+        # 4. Batch Score Retrieval (Performance Optimization)
         best_scores = {}
         for row in submitted_qs.values('student').annotate(best=Max('final_score')):
             best_scores[row['student']] = row['best']
@@ -141,46 +148,46 @@ def send_assignment_deadline_report(self, assignment_id, subject_template=None):
         score_details = []
         for student in all_students:
             score = best_scores.get(student.id)
-            score_str = f"{score} 分" if score is not None else "未提交"
+            score_str = f"{score} pts" if score is not None else "Not Submitted"
             score_details.append(
-                f"{student.first_name or student.username} ({student.student_id_num or '无'}): {score_str}"
+                f"{student.first_name or student.username} ({student.student_id_num or 'N/A'}): {score_str}"
             )
 
-        # 5. 构建邮件标题 (优先使用老师配置的模板)
+        # 5. Build Email Content
         if subject_template:
             subject = subject_template.format(title=assignment.title)
         else:
-            subject = f"【系统通知】作业截止统计报告：《{assignment.title}》"
+            subject = f"[System Notification] Assignment Deadline Report:《{assignment.title}》"
 
-        unsubmitted_text = "\n".join(unsubmitted_list) if unsubmitted_list else "祝贺！全员已按时提交。"
+        unsubmitted_text = "\n".join(unsubmitted_list) if unsubmitted_list else "Congratulations! All students submitted on time."
         score_details_text = "\n".join(score_details)
 
         message = f"""
-尊敬的 {teacher.first_name or teacher.username} 老师：
+Dear Professor {teacher.first_name or teacher.username}:
 
-您在课程《{assignment.course.name}》中发布的作业《{assignment.title}》统计报告已生成。
+The statistical report for the assignment "{assignment.title}" in course "{assignment.course.name}" is now ready.
 
-【作业概况】
+[Overview]
 -----------------------------------
-- 截止时间：{assignment.deadline.strftime('%Y-%m-%d %H:%M')}
-- 班级总人数：{total_count} 人
-- 已提交人数：{submitted_count} 人
-- 提交率：{(submitted_count / total_count * 100) if total_count > 0 else 0:.1f}%
-- 全班平均分（最高分平均）：{avg_score:.2f}
+- Deadline: {assignment.deadline.strftime('%Y-%m-%d %H:%M')}
+- Total Students: {total_count}
+- Submissions: {submitted_count}
+- Submission Rate: {(submitted_count / total_count * 100) if total_count > 0 else 0:.1f}%
+- Class Average (Based on best scores): {avg_score:.2f}
 
-【未提交名单 ({total_count - submitted_count}人)】
+[Missing Submissions ({total_count - submitted_count} students)]
 -----------------------------------
 {unsubmitted_text}
 
-【详细成绩快照】
+[Detailed Score Snapshot]
 -----------------------------------
 {score_details_text}
 
-请登录系统进入“评分工作区”查看具体代码。
+Please log in to the "Grading Workspace" to review the source code.
 
 ---
-本邮件根据您的系统全局配置自动生成。
-生成时间：{timezone.now().strftime('%Y-%m-%d %H:%M:%S')}
+This email was automatically generated based on system configurations.
+Generated at: {timezone.now().strftime('%Y-%m-%d %H:%M:%S')}
         """
 
         send_mail(
@@ -191,20 +198,20 @@ def send_assignment_deadline_report(self, assignment_id, subject_template=None):
             fail_silently=False,
         )
 
-        print(f"成功发送全局配置报告：作业 {assignment.title} -> {teacher.email}")
+        print(f"Report successfully sent: {assignment.title} -> {teacher.email}")
         Assignment.objects.filter(id=assignment_id).update(report_sent=True)
 
     except Assignment.DoesNotExist:
-        print(f"错误：找不到作业 ID {assignment_id}")
+        print(f"Error: Assignment ID {assignment_id} not found.")
     except Exception as e:
-        print(f"发送邮件失败: {str(e)}，尝试重试...")
+        print(f"Failed to send email: {str(e)}. Retrying...")
         raise self.retry(exc=e, countdown=60)
 
 
 @shared_task(
     bind=True,
     max_retries=2,
-    name='analyze_task'  # 🚀 显式指定名称，解决 KeyError 问题
+    name='analyze_task'
 )
 def async_generate_teaching_insights(self, assignment_id):
     """
