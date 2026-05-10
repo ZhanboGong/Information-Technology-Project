@@ -6,11 +6,13 @@ from celery import shared_task
 from django.utils import timezone
 from datetime import timedelta
 from django.db.models import Max, Avg
+from django.db import transaction
 from django.core.mail import send_mail
 
 from Backend import settings
-from .models import Assignment, Submission, User
+from .models import Assignment, Submission, User, TeachingInsightReport
 from .utils.grading_pipeline import GradingPipeline
+from .utils.ai_scorer import AIScorer
 
 @shared_task
 def run_grading_task(submission_id, temp_workspace, entry_point=None):
@@ -51,21 +53,28 @@ def run_grading_task(submission_id, temp_workspace, entry_point=None):
 @shared_task
 def check_deadlines_and_send_reports():
     """
-    根据老师的全局 NotificationConfig 偏好，动态扫描符合条件的作业。
+    Orchestrator Task: Scans for assignments reaching their reporting threshold
+    based on individual teacher preferences.
+
+    Workflow:
+    1. Filter: Targets only teachers who have explicitly opted into reports.
+    2. Window Calculation: Determines the 'Trigger Zone' by adding the teacher's
+       custom offset to the current time.
+    3. Selection: Identifies assignments that have entered this zone but haven't
+       been processed yet (report_sent=False).
+    4. Delegation: Offloads the intensive report generation to an asynchronous worker.
     """
     now = timezone.now()
 
-    # 1. 只获取开启了全局报告通知的配置
+    # 1. Get only the configuration that has global reporting notifications enabled
     from .models import NotificationConfig, Assignment
     configs = NotificationConfig.objects.filter(enable_report=True).select_related('teacher')
 
     for config in configs:
-        # 2. 计算该老师的触发时间窗口
-        # 触发逻辑：当前时间 >= (截止时间 - 老师设置的小时数)
-        # 转换一下：截止时间 <= (当前时间 + 老师设置的小时数)
+        # 2. Calculate the trigger time window for this teacher
         trigger_limit = now + timedelta(hours=config.remind_before_hours)
 
-        # 3. 找出该老师名下：已到达触发时间、且尚未发送报告的作业
+        # 3. Find assignments under the teacher's name that have reached their trigger time and have not yet sent a report
         pending_assignments = Assignment.objects.filter(
             teacher=config.teacher,
             report_sent=False,
@@ -73,11 +82,8 @@ def check_deadlines_and_send_reports():
         )
 
         for assignment in pending_assignments:
-            # 4. 立即标记为已发送，防止重复触发
-            assignment.report_sent = True
-            assignment.save(update_fields=['report_sent'])
 
-            # 5. 异步调用发送任务，传入老师定义的标题模板
+            # 4. The send task is called asynchronously, passing in the title template defined by the teacher
             send_assignment_deadline_report.delay(
                 assignment.id,
                 subject_template=config.subject_template
@@ -87,8 +93,8 @@ def check_deadlines_and_send_reports():
 # ---------------------------------------------------------
 # 任务 3: 生成并发送详细成绩报告邮件 (配置适配版)
 # ---------------------------------------------------------
-@shared_task
-def send_assignment_deadline_report(assignment_id, subject_template=None):
+@shared_task(bind=True, max_retries=3)
+def send_assignment_deadline_report(self, assignment_id, subject_template=None):
     """
     生成详细统计信息并发送给老师
     Args:
@@ -111,8 +117,7 @@ def send_assignment_deadline_report(assignment_id, subject_template=None):
 
         # 获取所有已完成提交的 QuerySet
         submitted_qs = Submission.objects.filter(assignment=assignment, status='completed')
-        submitted_student_ids = submitted_qs.values_list('student_id', flat=True).distinct()
-        submitted_count = len(submitted_student_ids)
+        submitted_count = submitted_qs.values('student').distinct().count()
 
         # 2. 计算平均分 (取每个学生的最高分进行平均)
         avg_score = submitted_qs.values('student').annotate(
@@ -120,17 +125,26 @@ def send_assignment_deadline_report(assignment_id, subject_template=None):
         ).aggregate(average=Avg('best'))['average'] or 0
 
         # 3. 未提交学生名单
-        unsubmitted_students = all_students.exclude(id__in=submitted_student_ids)
+        unsubmitted_students = all_students.exclude(
+            id__in=Submission.objects.filter(
+                assignment=assignment, status='completed'
+            ).values_list('student_id', flat=True)
+        )
         unsubmitted_list = [f"- {s.first_name or s.username} (学号: {s.student_id_num or '无'})" for s in
                             unsubmitted_students]
 
-        # 4. 组装成绩快照文本
+        # 4. 批量获取每个学生的最高分（一次查询）
+        best_scores = {}
+        for row in submitted_qs.values('student').annotate(best=Max('final_score')):
+            best_scores[row['student']] = row['best']
+
         score_details = []
         for student in all_students:
-            best_sub = submitted_qs.filter(student=student).order_by('-final_score').first()
-            score_str = f"{best_sub.final_score} 分" if best_sub else "未提交"
+            score = best_scores.get(student.id)
+            score_str = f"{score} 分" if score is not None else "未提交"
             score_details.append(
-                f"{student.first_name or student.username} ({student.student_id_num or '无'}): {score_str}")
+                f"{student.first_name or student.username} ({student.student_id_num or '无'}): {score_str}"
+            )
 
         # 5. 构建邮件标题 (优先使用老师配置的模板)
         if subject_template:
@@ -178,8 +192,299 @@ def send_assignment_deadline_report(assignment_id, subject_template=None):
         )
 
         print(f"成功发送全局配置报告：作业 {assignment.title} -> {teacher.email}")
+        Assignment.objects.filter(id=assignment_id).update(report_sent=True)
 
     except Assignment.DoesNotExist:
         print(f"错误：找不到作业 ID {assignment_id}")
     except Exception as e:
-        print(f"🚨 发送邮件失败: {str(e)}")
+        print(f"发送邮件失败: {str(e)}，尝试重试...")
+        raise self.retry(exc=e, countdown=60)
+
+
+@shared_task(
+    bind=True,
+    max_retries=2,
+    name='analyze_task'  # 🚀 显式指定名称，解决 KeyError 问题
+)
+def async_generate_teaching_insights(self, assignment_id):
+    """
+    异步教情诊断任务：
+    1. 聚合班级最高分数据
+    2. 计算知识点掌握度汇总
+    3. 调用 AI 教授模型进行深度诊断
+    4. 将结果持久化到 TeachingInsightReport 表
+    """
+    print("\n" + "=" * 30)
+    print(f"🔥 WORKER IS ACTUALLY RUNNING: {assignment_id}")
+    print("=" * 30 + "\n")
+    report = None
+    try:
+        # --- 初始化：获取对象并标记状态 ---
+        print(f"🚀 [TASK START] Processing Assignment ID: {assignment_id}")
+        assignment = Assignment.objects.get(id=assignment_id)
+
+        # 获取或创建报告记录
+        report, _ = TeachingInsightReport.objects.get_or_create(assignment=assignment)
+        report.status = 'pending'
+        report.save()
+
+        # --- 1. 数据聚合逻辑 (基于内存去重，确保统计的是每位学生的最优表现) ---
+        all_subs = Submission.objects.filter(
+            assignment=assignment,
+            status='completed'
+        ).order_by('student', '-final_score', '-id').select_related('student', 'ai_evaluation')
+
+        best_submissions = []
+        seen_students = set()
+        for s in all_subs:
+            if s.student_id not in seen_students:
+                if hasattr(s, 'ai_evaluation'):
+                    best_submissions.append(s)
+                    seen_students.add(s.student_id)
+
+        if not best_submissions:
+            print(f"⚠️ [TASK] No submissions found for assignment {assignment_id}")
+            report.status = 'error'
+            report.save()
+            return "No submissions found"
+
+        # --- 2. 统计指标计算 ---
+        kp_stats = {}
+        common_issues = []
+        total_score_sum = 0
+
+        for sub in best_submissions:
+            total_score_sum += float(sub.final_score or 0)
+            evaluation = sub.ai_evaluation
+
+            # 聚合知识点得分
+            if evaluation.kp_scores and isinstance(evaluation.kp_scores, dict):
+                for kp_name, score in evaluation.kp_scores.items():
+                    if kp_name not in kp_stats:
+                        kp_stats[kp_name] = []
+                    kp_stats[kp_name].append(float(score))
+
+            # 收集反馈片段用于 AI 上下文
+            if evaluation.feedback:
+                common_issues.append(evaluation.feedback[:80])
+
+        # 格式化知识点汇总
+        kp_summary_text = [f"- {name}: 平均 {round(sum(v) / len(v), 1)}分" for name, v in kp_stats.items()]
+        class_avg = round(total_score_sum / len(best_submissions), 1)
+
+        # --- 3. 🤖 调用 AI (灵魂 Prompt) ---
+        scorer = AIScorer()
+        prompt = f"""
+        You are a senior Computer Science Professor. Analyze the class performance for the assignment: '{assignment.title}'.
+
+        [Statistical Data]
+        - Total Students (Best Attempts): {len(best_submissions)}
+        - Class Average: {class_avg}
+        - Knowledge Point Mastery: 
+        {chr(10).join(kp_summary_text)}
+
+        [Student Feedback Snippets]
+        {chr(10).join(common_issues[:10])}
+
+        [Task]
+        Based on the data, identify collective weaknesses and provide actionable teaching advice.
+
+        [Output Requirement]
+        Return ONLY a JSON object with:
+        - "analysis": A brief summary of class performance.
+        - "strengths": A list of 2 key areas where the class excelled.
+        - "weaknesses": A list of 2 key areas needing improvement.
+        - "suggestions": A list of 3 specific teaching adjustments for the next lecture.
+        """
+
+        print("🤖 [TASK] Calling AI Scorer...")
+        raw_res = scorer.ask(prompt)
+        print("✅ [TASK] AI Scorer Responded!")
+
+        # --- 4. 健壮的 JSON 解析逻辑 ---
+        try:
+            # 这里的正则比 re.sub 更强，它会抓取第一个 { 和最后一个 } 之间的内容
+            json_match = re.search(r'\{.*\}', raw_res, re.DOTALL)
+            if json_match:
+                clean_json_str = json_match.group()
+            else:
+                clean_json_str = raw_res
+
+            insights = json.loads(clean_json_str)
+        except Exception as json_err:
+            print(f"❌ [TASK] JSON Parse Error: {str(json_err)}")
+            # 即使解析失败，也手动构造一个结构，防止状态卡在 pending
+            insights = {
+                "analysis": "AI 返回格式异常，请查看原始数据",
+                "strengths": ["数据解析失败"],
+                "weaknesses": ["数据解析失败"],
+                "suggestions": ["请尝试重新点击分析按钮"],
+                "raw_data": raw_res[:200]  # 记录前200个字备查
+            }
+
+        # --- 5. 数据持久化回填 ---
+        report.stats_data = {
+            "count": len(best_submissions),
+            "average": class_avg,
+            "kp_mastery": {k: round(sum(v) / len(v), 1) for k, v in kp_stats.items()}
+        }
+        report.ai_insights = insights
+        report.status = 'ready'  # 🚀 关键：标记为 ready 才会停止轮询
+        report.save()
+
+        print(f"🎉 [TASK SUCCESS] Report updated for {assignment.title}")
+        return f"Success for {assignment.id}"
+
+    except Exception as e:
+        print(f"🔥 [TASK FATAL ERROR] {str(e)}")
+        if report:
+            report.status = 'error'
+            report.save()
+        # 异常重试逻辑
+        raise self.retry(exc=e, countdown=60)
+
+def _aggregate_by_student(raw_matches):
+    """将文件级对比聚合为学生级分析"""
+    from collections import defaultdict
+
+    # 1. 按学生对聚合
+    student_pairs = defaultdict(lambda: {'similarity_sum': 0, 'count': 0, 'max_similarity': 0, 'files': []})
+
+    for m in raw_matches:
+        a = m.get('student_a', m.get('file_a', '').split('/')[0])
+        b = m.get('student_b', m.get('file_b', '').split('/')[0])
+        sim = m.get('similarity', 0)
+
+        key = tuple(sorted([a, b]))
+
+        student_pairs[key]['similarity_sum'] += sim
+        student_pairs[key]['count'] += 1
+        student_pairs[key]['max_similarity'] = max(student_pairs[key]['max_similarity'], sim)
+
+        student_pairs[key]['files'].append({
+            'file_a': m.get('file_a', ''),
+            'file_b': m.get('file_b', ''),
+            'similarity': sim
+        })
+
+    # 2. 计算每个学生对的平均相似度
+    aggregated = []
+    for (a, b), data in student_pairs.items():
+        avg_sim = round(data['similarity_sum'] / data['count'], 1) if data['count'] > 0 else 0
+        aggregated.append({
+            'student_a': a,
+            'student_b': b,
+            'avg_similarity': avg_sim,
+            'max_similarity': data['max_similarity'],
+            'matched_files': data['count'],
+            'files': sorted(data['files'], key=lambda x: x['similarity'], reverse=True)[:10]
+        })
+
+    aggregated.sort(key=lambda x: x['max_similarity'], reverse=True)
+
+    # 3. 生成学生风险排名
+    student_risk = defaultdict(lambda: {'high': 0, 'medium': 0, 'low': 0, 'total_pairs': 0})
+    for pair in aggregated:
+        for s in [pair['student_a'], pair['student_b']]:
+            student_risk[s]['total_pairs'] += 1
+            if pair['max_similarity'] > 80:
+                student_risk[s]['high'] += 1
+            elif pair['max_similarity'] > 50:
+                student_risk[s]['medium'] += 1
+            else:
+                student_risk[s]['low'] += 1
+
+    risk_summary = []
+    for student, risk in student_risk.items():
+        risk_level = 'high' if risk['high'] > 0 else ('medium' if risk['medium'] > 0 else 'low')
+        risk_summary.append({
+            'student': student,
+            'risk_level': risk_level,
+            'high_count': risk['high'],
+            'medium_count': risk['medium'],
+            'total_pairs': risk['total_pairs']
+        })
+    risk_summary.sort(key=lambda x: (0 if x['risk_level'] == 'high' else 1 if x['risk_level'] == 'medium' else 2))
+
+    return {
+        'student_pairs': aggregated,
+        'risk_summary': risk_summary,
+        'total_pairs': len(aggregated),
+        'high_risk_count': sum(1 for p in aggregated if p['max_similarity'] > 80),
+        'medium_risk_count': sum(1 for p in aggregated if 50 < p['max_similarity'] <= 80)
+    }
+
+
+@shared_task(bind=True, max_retries=2)
+def async_plagiarism_check(self, report_id, assignment_id):
+    """异步代码查重任务"""
+    from .models import PlagiarismReport, Submission
+    from .utils.moss_checker import MOSSChecker
+
+    report = PlagiarismReport.objects.get(id=report_id)
+    try:
+        assignment = Assignment.objects.get(id=assignment_id)
+
+        # 收集每个学生的最优提交
+        submissions = Submission.objects.filter(
+            assignment=assignment, status='completed'
+        ).order_by('student', '-final_score', '-id').select_related('student')
+
+        import zipfile
+        best_subs = []
+        seen_students = set()
+
+        for sub in submissions:
+            if sub.student_id not in seen_students:
+                seen_students.add(sub.student_id)
+                if not sub.file or not os.path.exists(sub.file.path):
+                    continue
+
+                file_path = sub.file.path
+                filename = os.path.basename(file_path)
+
+                # ZIP 文件：解压提取源码
+                if filename.lower().endswith('.zip'):
+                    try:
+                        with zipfile.ZipFile(file_path, 'r') as zf:
+                            for info in zf.infolist():
+                                if info.filename.lower().endswith(('.py', '.java')) and not info.is_dir():
+                                    code = zf.read(info.filename).decode('utf-8', errors='ignore')
+                                    safe_name = f"{sub.student.username}/{info.filename}"
+                                    best_subs.append((safe_name, code))
+                    except Exception:
+                        continue
+                # 单个源码文件：直接读取
+                elif filename.lower().endswith(('.py', '.java')):
+                    try:
+                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            best_subs.append((f"{sub.student.username}/{filename}", f.read()))
+                    except Exception:
+                        continue
+
+        if len(best_subs) < 2:
+            report.status = 'error'
+            report.error_message = 'Need at least 2 submissions with files'
+            report.save()
+            return
+
+        # 执行查重
+        checker = MOSSChecker()
+        result = checker.check_plagiarism(best_subs, language=assignment.category)
+
+        # 持久化结果
+        report.mode = result.get('mode')
+        report.report_url = result.get('report_url')
+        raw_matches = result.get('matches', [])
+        report.file_count = result.get('file_count', 0)
+
+        # 学生级别聚合分析
+        report.matches = _aggregate_by_student(raw_matches)
+        report.status = 'completed'
+        report.save()
+
+    except Exception as e:
+        report.status = 'error'
+        report.error_message = str(e)
+        report.save()
+        raise self.retry(exc=e, countdown=60)
