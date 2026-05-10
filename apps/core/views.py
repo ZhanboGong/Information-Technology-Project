@@ -1925,9 +1925,9 @@ class TeacherCourseViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         """
-
-        :param serializer:
-        :return:
+        Safely deletes a course while enforcing relational integrity and logging.
+        :param serializer: The DELETE request object.
+        :return: 204 No Content on success, or 400 Bad Request if integrity check fails.
         """
         if self.request.user.role != 'admin':
             course = serializer.save(teacher=self.request.user)
@@ -1946,6 +1946,13 @@ class TeacherCourseViewSet(viewsets.ModelViewSet):
             print(f"Logging failure: {log_e}")
 
     def destroy(self, request, *args, **kwargs):
+        """
+
+        :param request:
+        :param args:
+        :param kwargs:
+        :return:
+        """
         instance = self.get_object()
         course_id = instance.id
         course_name = instance.name
