@@ -8,6 +8,9 @@ import shutil
 import pandas as pd
 import requests
 import traceback
+import re
+
+from rest_framework.pagination import PageNumberPagination
 
 from apps.analytics.models import AIServiceLog
 from django.conf import settings
@@ -40,7 +43,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 
 # Import the model and serializer
 from .models import (User, Course, Assignment, Submission, AIEvaluation, KnowledgePoint, SystemConfiguration,
-                     NotificationConfig, Group, SystemOperationLog, EmailVerificationToken)
+                     NotificationConfig, Group, SystemOperationLog, EmailVerificationToken, PlagiarismReport)
 from .serializers import (
     AssignmentSerializer,
     SubmissionSerializer,
@@ -48,6 +51,7 @@ from .serializers import (
     CourseSerializer, KnowledgePointSerializer, UserProfileSerializer, ChangePasswordSerializer, SystemConfigurationSerializer,
     NotificationConfigSerializer, GroupSerializer
 )
+from .tasks import async_plagiarism_check
 from .utils.ai_scorer import AIScorer
 from .utils.project_analyzer import ProjectAnalyzer
 
@@ -645,7 +649,18 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
             evaluation.save()
             sub = evaluation.submission
             sub.final_score = new_score
-            sub.save()
+            sub.save(update_fields=['final_score'])
+
+            # 重新聚合该学生在该作业下的历史最高分
+            highest = AIEvaluation.objects.filter(
+                submission__student=sub.student,
+                submission__assignment=sub.assignment
+            ).aggregate(max_val=Max('total_score'))['max_val']
+
+            Submission.objects.filter(
+                student=sub.student,
+                assignment=sub.assignment
+            ).update(final_score=highest)
             try:
                 SystemOperationLog.objects.create(
                     user=request.user,
@@ -666,125 +681,165 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'], url_path='suggest-kps')
     def suggest_knowledge_points(self, request):
-        """
-        AI intelligence suggests and automatically generates L2 level knowledge points.
-
-        Business Background:
-        When teachers publish assignments, they often need to manually define specific test points (L2 knowledge points).
-        The interface uses AI to deeply analyze job requirements (Content) and scoring dimensions (Rubric) and generate them automatically
-        Professional programming skill points to match and tie them to the current curriculum.
-
-        Logical flow:
-        1. Context Construction: Format the Rubric configuration items into AI-readable textual descriptions.
-        2. Prompt-driven: Requires the AI to identify 3-5 core skills and output a rigid JSON structure.
-        3. Result cleaning: Handle Markdown tags in AI responses and parse them into Python objects.
-        4. Automatic persistence: Use 'get_or_create' to ensure that points with the same name in the same course and language are not repeated.
-        5. Front-end synchronization: Returns data containing the database ID so that the front-end can be directly used for job association.
-        :param request: Requests containing title, content, language, course_id, rubric_config.
-        :return: A list of suggested knowledge points (with ids and existing/newly created identifiers).
-        """
+        """AI 智能推荐 L2 知识点（CoT + 已有 KP 上下文注入 + 模糊去重）。"""
         title = request.data.get('title', '')
         content = request.data.get('content', '')
         language = request.data.get('language', 'python')
-        # Get the course ID (L2 must be bound to the course)
         course_id = request.data.get('course', request.data.get('course_id'))
-        # Get the rating scale filled out in step 2
         rubric_config = request.data.get('rubric_config', {})
 
         if not content:
             return Response({"error": "Assignment requirements (content) cannot be empty."}, status=400)
-
         if not course_id:
             return Response({"error": "Course ID is required to generate L2 Knowledge Points."}, status=400)
 
-        # 1. Convert the Rubric into a readable text description for AI reference
+        # 1. 查询已有知识点上下文（限 15 条，控制 token 用量）
+        existing_l1 = KnowledgePoint.objects.filter(
+            is_system=True, language__iexact=language
+        )[:15]
+        existing_l2 = KnowledgePoint.objects.filter(
+            course_id=course_id, language__iexact=language, is_system=False
+        )[:15]
+
+        l1_lines = []
+        for kp in existing_l1:
+            desc = (kp.description or 'N/A')[:80]
+            l1_lines.append(f"- {kp.name}: {desc}")
+        l1_list = "\n".join(l1_lines) or "None defined yet."
+
+        l2_lines = []
+        for kp in existing_l2:
+            desc = (kp.description or 'N/A')[:80]
+            l2_lines.append(f"- {kp.name}: {desc}")
+        l2_list = "\n".join(l2_lines) or "None defined yet."
+
+        existing_kp_names = set()
+        for kp in list(existing_l1) + list(existing_l2):
+            existing_kp_names.add(kp.name.lower().strip())
+
+        # 2. 构建 Rubric 描述
         rubric_desc = ""
-        if rubric_config and 'items' in rubric_config:
-            rubric_desc = "\n".join([
-                f"- Assessment Dimension: {item.get('criterion')} (Weight: {item.get('weight')}%)"
-                for item in rubric_config.get('items', [])
-            ])
+        rubric_items = rubric_config.get('items', []) if rubric_config else []
+        if rubric_items:
+            rubric_lines = []
+            for item in rubric_items:
+                rubric_lines.append(f"- {item.get('criterion')} (Weight: {item.get('weight')}%)")
+            rubric_desc = "\n".join(rubric_lines)
+
+        # 3. 构造带 CoT 的 Prompt
+        truncated_content = content[:2000]
+        rubric_text = rubric_desc or "Standard coding practices"
+
+        prompt_lines = [
+            "You are a Computer Science curriculum designer.",
+            "Identify 3-5 specific L2 knowledge points that students must demonstrate to complete this assignment.",
+            "",
+            "=== Assignment Info ===",
+            f"Title: {title}",
+            f"Requirements: {truncated_content}",
+            f"Language: {language}",
+            "",
+            "=== Rubric Dimensions ===",
+            rubric_text,
+            "",
+            "=== Existing L1 Knowledge Points (system-level, DO NOT repeat these):",
+            l1_list,
+            "",
+            "=== Existing L2 Knowledge Points in this course (DO NOT repeat these):",
+            l2_list,
+            "",
+            "=== Your Task ===",
+            "Step 1: Read the assignment requirements carefully. Identify the core programming concepts required.",
+            "Step 2: Cross-reference with existing knowledge points above. Only suggest NEW ones that don't overlap.",
+            "Step 3: For each new knowledge point, write a description that explains HOW to assess it — what code patterns indicate mastery.",
+            "",
+            "=== Rules ===",
+            "1. Names must be concise (2-4 words), e.g., 'Exception Handling', 'Polymorphism'",
+            "2. Names must NOT duplicate any existing L1 or L2 knowledge points listed above",
+            "3. Descriptions should be actionable: explain what a student's code should demonstrate",
+            "4. Each knowledge point should map to a specific rubric dimension when possible",
+            "5. Return exactly 3-5 knowledge points, not more",
+            "",
+            'Return a JSON object: {"suggested_kps": [{"name": "...", "description": "..."}]}',
+        ]
+        prompt = "\n".join(prompt_lines)
 
         scorer = AIScorer()
 
-        # 2. Construct Prompt
-        prompt = f"""
-            You are a professional programming teaching assistant. Please identify 3-5 core programming skills (L2 level) that students must master to complete this task.
-
-            [Assignment Title]:{title}
-            [Assignment Requirements]:{content}
-            [Programming Language]:{language}
-            [Grading Standards (Rubric)]:
-            {rubric_desc or "Standard coding practices"}
-
-            Requirements:
-            1. Knowledge point names (name) should be concise (e.g., Recursion, Class Inheritance, Exception Handling).
-            2. The detailed assessment logic (description) should explain how students should apply the technology based on the requirements and rubric to achieve high scores.
-            3. Output the result directly in JSON format. Do not include Markdown tags like ```json.
-
-            JSON Format:
-            {{
-                "suggested_kps": [
-                    {{"name": "Skill Name", "description": "Detailed assessment logic说明"}},
-                    ...
-                ]
-            }}
-            """
-
         try:
-            # 3. Ask the AI and clean the results
+            # 4. 调用 AI + JSON 解析
             raw_res = scorer.ask(prompt)
-            clean_json = raw_res.replace('```json', '').replace('```', '').strip()
+
+            json_match = re.search(r'\{.*\}', raw_res, re.DOTALL)
+            if json_match:
+                clean_json = json_match.group()
+            else:
+                clean_json = raw_res.replace('```json', '').replace('```', '').strip()
             suggestions = json.loads(clean_json)
 
-            # 4. Automatic persistence: The suggested knowledge points are written to the database
+            # 5. 去重 + 持久化
             course_obj = Course.objects.get(id=course_id)
             final_suggestions = []
 
             for kp_data in suggestions.get('suggested_kps', []):
-                # If the KP with the same name, language, and course already exists, it will be obtained, and if not, it will be created
-                kp, created = KnowledgePoint.objects.get_or_create(
-                    name=kp_data['name'],
+                kp_name = kp_data.get('name', '').strip()
+                kp_desc = kp_data.get('description', '').strip()
+                if not kp_name:
+                    continue
+
+                # 精确匹配
+                existing = KnowledgePoint.objects.filter(
+                    name__iexact=kp_name,
                     course=course_obj,
-                    language=language.lower(),
-                    defaults={
-                        'description': kp_data['description'],
-                        'category': 'L2',
-                        'is_system': False
-                    }
+                    language__iexact=language
+                ).first()
+
+                if existing:
+                    final_suggestions.append({
+                        "id": existing.id,
+                        "name": existing.name,
+                        "description": existing.description,
+                        "is_new": False
+                    })
+                    continue
+
+                # 模糊去重
+                name_lower = kp_name.lower().strip()
+                if name_lower in existing_kp_names:
+                    continue
+
+                # 创建新 KP
+                kp = KnowledgePoint.objects.create(
+                    name=kp_name,
+                    description=kp_desc,
+                    category='L2',
+                    is_system=False,
+                    course=course_obj,
+                    language=language.lower()
                 )
-                # Combine the data returned to the frontend, including the database ID
+                existing_kp_names.add(name_lower)
                 final_suggestions.append({
                     "id": kp.id,
                     "name": kp.name,
                     "description": kp.description,
-                    "is_new": created
+                    "is_new": True
                 })
 
-            # 5. Return results
-            return Response({
-                "suggested_kps": final_suggestions
-            })
+            return Response({"suggested_kps": final_suggestions})
 
         except Course.DoesNotExist:
             return Response({"error": "The specified course does not exist."}, status=404)
         except json.JSONDecodeError:
-            print(f"Failed to parse AI response: {raw_res}")
+            print(f"[KP-Suggest] Failed to parse AI response: {raw_res[:200]}")
             return Response({"error": "AI returned an invalid format. Please try again."}, status=500)
         except Exception as e:
-            print(f"AI KP Generation Error: {str(e)}")
+            print(f"[KP-Suggest] Error: {str(e)}")
             return Response({"error": f"AI generation failed: {str(e)}"}, status=500)
 
     @action(detail=False, methods=['post'], url_path='suggest-rubric')
     def suggest_rubric(self, request):
         """
-        AI 智能生成作业评分标准矩阵 (Rubric Matrix)
-
-        逻辑：
-        1. 接收老师输入的标题、要求和编程语言。
-        2. 构造 Prompt，要求 AI 输出 3-5 个评分维度。
-        3. 每个维度包含 Weight(权重) 和 5 个等级 (HD/D/C/P/Fail) 的详细描述。
-        4. 确保输出格式严格匹配前端的 rubric_config 结构。
+        AI 智能生成作业评分标准矩阵（带 CoT + 权重自动归一化 + 健壮 JSON 解析）。
         """
         title = request.data.get('title', 'New Assignment')
         content = request.data.get('content', '')
@@ -795,68 +850,71 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
         scorer = AIScorer()
 
-        # 构造 Prompt，强制 AI 遵循你前端定义的 5 个等级名称
-        prompt = f"""
-                You are an expert Computer Science Professor. Please design a professional grading rubric matrix for the following programming assignment.
-
-                [Assignment Title]: {title}
-                [Requirements]: {content}
-                [Programming Language]: {language}
-
-                Task:
-                Create 3-5 distinct assessment criteria (e.g., Logical Correctness, Code Quality, Algorithm Efficiency).
-                For each criterion, provide detailed descriptions for exactly 5 performance levels:
-                1. "High Distinction (85-100%)"
-                2. "Distinction (75-84%)"
-                3. "Credit (65-74%)"
-                4. "Pass (50-64%)"
-                5. "Fail (0-49%)"
-
-                Requirements:
-                - The sum of 'weight' for all criteria must be exactly 100.
-                - Output ONLY raw JSON. No markdown tags like ```json.
-                - Follow this exact structure:
-                {{
-                    "rubric": {{
-                        "items": [
-                            {{
-                                "criterion": "Criterion Name",
-                                "weight": 25,
-                                "description": "Brief goal of this dimension",
-                                "detailed_rubric": {{
-                                    "High Distinction (85-100%)": "...",
-                                    "Distinction (75-84%)": "...",
-                                    "Credit (65-74%)": "...",
-                                    "Pass (50-64%)": "...",
-                                    "Fail (0-49%)": "..."
-                                }}
-                            }}
-                        ]
-                    }}
-                }}
-            """
+        # 带 CoT 的 Prompt
+        prompt_lines = [
+            "You are an expert Computer Science Professor.",
+            "Design a professional grading rubric matrix for the following programming assignment.",
+            "",
+            "=== Assignment Info ===",
+            f"Title: {title}",
+            f"Requirements: {content}",
+            f"Language: {language}",
+            "",
+            "=== Your Task ===",
+            "Step 1: Identify 3-5 core assessment dimensions based on the assignment requirements.",
+            "Step 2: For each dimension, define clear descriptions for all 5 grade levels.",
+            "Step 3: Assign weights that sum to exactly 100.",
+            "",
+            "=== Grade Level Descriptions ===",
+            "- High Distinction (85-100%): Exceptional work. Shows deep understanding, elegant code, handles edge cases, exceeds requirements.",
+            "- Distinction (75-84%): Strong work. Correct logic, clean code, good structure, meets all requirements fully.",
+            "- Credit (65-74%): Competent work. Mostly correct, minor issues in code quality or edge case handling.",
+            "- Pass (50-64%): Basic pass. Core logic works but has noticeable flaws, poor structure, or missing features.",
+            "- Fail (0-49%): Does not meet requirements. Major logic errors, incomplete submission, or fundamentally wrong approach.",
+            "",
+            "=== Rules ===",
+            "1. Criterion names should be concise (e.g., 'Algorithm Logic', 'Code Quality', 'Error Handling')",
+            "2. Each level description must be specific and observable — what would a reviewer see in the code?",
+            "3. Weight must sum to exactly 100",
+            "4. At least one criterion should assess core logic/correctness",
+            "5. Each level description should be 1-2 sentences, clear enough for consistent grading",
+            "",
+            'Return a JSON object: {"rubric": {"items": [{"criterion": "...", "weight": 25, "description": "...", "detailed_rubric": {"High Distinction (85-100%)": "...", "Distinction (75-84%)": "...", "Credit (65-74%)": "...", "Pass (50-64%)": "...", "Fail (0-49%)": "..."}}]}}',
+        ]
+        prompt = "\n".join(prompt_lines)
 
         try:
             raw_res = scorer.ask(prompt)
-            # 清洗 AI 可能带出的 Markdown 标签
-            import re
-            clean_json = re.sub(r'```json\s?|\s?```', '', raw_res).strip()
+
+            # 健壮 JSON 解析
+            json_match = re.search(r'\{.*\}', raw_res, re.DOTALL)
+            if json_match:
+                clean_json = json_match.group()
+            else:
+                clean_json = raw_res.replace('```json', '').replace('```', '').strip()
             rubric_data = json.loads(clean_json)
 
-            # 校验权重总和，如果 AI 算错了，后端做一个简单的最后兜底（或者让老师去改）
+            # 校验 + 自动归一化权重
             items = rubric_data.get('rubric', {}).get('items', [])
-            total_w = sum(item.get('weight', 0) for item in items)
-
-            # 如果权重不等于100，尝试平均分配或保持原样让老师调整
-            if total_w != 100 and len(items) > 0:
-                print(f"Warning: AI generated total weight {total_w} instead of 100")
+            if items:
+                total_w = sum(item.get('weight', 0) for item in items)
+                if total_w != 100 and total_w > 0:
+                    scale = 100 / total_w
+                    for item in items:
+                        item['weight'] = round(item.get('weight', 0) * scale)
+                    # 修正四舍五入误差
+                    new_total = sum(item['weight'] for item in items)
+                    if new_total != 100 and items:
+                        max_item = max(items, key=lambda x: x['weight'])
+                        max_item['weight'] += (100 - new_total)
 
             return Response(rubric_data)
 
         except json.JSONDecodeError:
+            print(f"[Rubric-Suggest] Failed to parse AI response: {raw_res[:200]}")
             return Response({"error": "AI returned an invalid format. Please try again."}, status=500)
         except Exception as e:
-            traceback.print_exc()
+            print(f"[Rubric-Suggest] Error: {str(e)}")
             return Response({"error": f"AI Rubric generation failed: {str(e)}"}, status=500)
 
     @action(detail=False, methods=['get'], url_path='download-submission')
@@ -1120,12 +1178,30 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
         # Score after cleaning the dictionary mapping (for example: {" collectionsmanagementparts35 ": 78})
         clean_scores_map = {sanitize_key(k): v for k, v in student_scores_data.items()}
-
+        font_registered = False
+        font_paths = [
+            'C:/Windows/Fonts/simhei.ttf',
+            'C:/Windows/Fonts/msyh.ttc',
+            '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc',
+            '/System/Library/Fonts/PingFang.ttc',
+        ]
+        for fp in font_paths:
+            if os.path.exists(fp):
+                try:
+                    pdfmetrics.registerFont(TTFont('ChineseFont', fp))
+                    font_registered = True
+                    break
+                except Exception:
+                    continue
+        base_font = 'ChineseFont' if font_registered else 'Helvetica'
         # PDF basic Settings
         buffer = io.BytesIO()
         doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
         elements = []
         styles = getSampleStyleSheet()
+        if font_registered:
+            for style_name in styles.byName:
+                styles[style_name].fontName = base_font
 
         # Header information
         elements.append(Paragraph(f"<b>Performance Report: {assignment.title}</b>", styles['Title']))
@@ -1283,7 +1359,23 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
         def sanitize_key(text):
             return re.sub(r'[\s\W_]+', '', str(text)).lower()
-
+        # Register Chinese font for PDF generation
+        font_registered = False
+        font_paths = [
+            'C:/Windows/Fonts/simhei.ttf',
+            'C:/Windows/Fonts/msyh.ttc',
+            '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc',
+            '/System/Library/Fonts/PingFang.ttc',
+        ]
+        for fp in font_paths:
+            if os.path.exists(fp):
+                try:
+                    pdfmetrics.registerFont(TTFont('ChineseFont', fp))
+                    font_registered = True
+                    break
+                except Exception:
+                    continue
+        base_font = 'ChineseFont' if font_registered else 'Helvetica'
         with zipfile.ZipFile(byte_io, 'w', zipfile.ZIP_DEFLATED) as zip_file:
             for sub in best_submissions:
                 evaluation = getattr(sub, 'ai_evaluation', None)
@@ -1296,7 +1388,9 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
                                             bottomMargin=30)
                     elements = []
                     styles = getSampleStyleSheet()
-
+                    if font_registered:
+                        for style_name in styles.byName:
+                            styles[style_name].fontName = base_font
                     # Header information
                     elements.append(Paragraph(f"<b>Performance Report: {assignment.title}</b>", styles['Title']))
                     elements.append(Paragraph(
@@ -1473,9 +1567,25 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         # 1. Obtaining grievance records
         appeal = get_object_or_404(Appeal, id=pk)
 
+        if appeal.evaluation.submission.assignment.teacher != request.user:
+            return Response({"error": "You do not have permission to resolve this appeal"}, status=403)
+
+        if appeal.status != 'pending_teacher':
+            return Response(
+                {"error": f"This appeal is in '{appeal.get_status_display()}' status and cannot be processed"},
+                status=400)
+
         # 2. Getting parameters
         new_score = request.data.get('adjusted_score')
         teacher_remark = request.data.get('teacher_remark')
+
+        if new_score is not None:
+            try:
+                score_val = float(new_score)
+                if score_val < 0 or score_val > 100:
+                    return Response({"error": "Score must be between 0 and 100"}, status=400)
+            except (ValueError, TypeError):
+                return Response({"error": "Invalid score format"}, status=400)
 
         with transaction.atomic():
             # 3. If the teacher gives a new grade, directly overwrite the AI's grading record
@@ -1525,105 +1635,157 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'], url_path='teaching-insights')
     def get_teaching_insights(self, request, pk=None):
         """
-        AI Teaching Insights: Generating Learning Diagnoses and Teaching Recommendations Based on Overall Class Performance.
-        1. Statistical modeling: The "historical best performance" of each student is obtained by memory deduplication, and the real ability benchmark of the class is constructed.
-        2. Dimension mining: Deeply analyze the kp_scores of all AI evaluations in the class, and calculate the average mastery of each dimension.
-        3. Semantic analysis: extract summaries of student feedback and identify group logical blind spots or code style problems.
-        4. AI professor diagnosis: The summary indicators are fed into the big model to simulate the expert perspective and output a structured report containing "performance summary, strengths, weaknesses, intervention recommendations".
-        :return: JSON data with class statistics and AI insights
+        AI Teaching Insights (异步版本):
+        1. 检查是否已有缓存报告 → 直接返回
+        2. 没有则触发 Celery 异步任务 → 返回 pending 状态
+        3. 前端轮询直到 status 为 ready
+        """
+        from .models import TeachingInsightReport
+
+        assignment = self.get_object()
+
+        # 1. 检查是否已有缓存报告
+        try:
+            report = TeachingInsightReport.objects.get(assignment=assignment)
+            if report.status == 'ready':
+                return Response({
+                    "status": "ready",
+                    "stats": report.stats_data,
+                    "ai_insights": report.ai_insights
+                })
+            elif report.status == 'pending':
+                return Response({"status": "pending", "message": "AI is analyzing, please wait..."})
+            elif report.status == 'error':
+                # 报告生成失败，重新触发
+                report.delete()
+        except TeachingInsightReport.DoesNotExist:
+            pass
+
+        # 2. 没有报告，触发异步任务
+        from .tasks import async_generate_teaching_insights
+        async_generate_teaching_insights.delay(assignment.id)
+
+        # 创建 pending 状态的记录
+        TeachingInsightReport.objects.get_or_create(
+            assignment=assignment,
+            defaults={'status': 'pending'}
+        )
+
+        return Response({"status": "pending", "message": "AI analysis started, please wait..."})
+
+    @action(detail=True, methods=['post'], url_path='plagiarism-check')
+    def plagiarism_check(self, request, pk=None):
+        """
+        Triggers an asynchronous plagiarism audit for an assignment.
+        Workflow Logic:
+        1. Idempotency Check: Prevents redundant scans if a report is 'pending'.
+        2. Record Creation: Initializes a `PlagiarismReport` to track the task.
+        3. Task Dispatch: Offloads the heavy lifting to Celery.
+        4. Feedback: Returns the report ID for frontend status polling.
+        :param request: The incoming HTTP POST request.
+        :param pk: Primary key of the assignment to be audited.
+        :return: Response containing the report ID and current status.
         """
         assignment = self.get_object()
 
-        # 1. Get the highest score commit for each student/group (memory deduplication logic)
-        all_subs = Submission.objects.filter(
-            assignment=assignment,
-            status='completed'
-        ).order_by('student', '-final_score', '-id').select_related('student', 'ai_evaluation')
-
-        best_submissions = []
-        seen_students = set()
-        for s in all_subs:
-            if s.student_id not in seen_students:
-                if hasattr(s, 'ai_evaluation'):
-                    best_submissions.append(s)
-                    seen_students.add(s.student_id)
-
-        if not best_submissions:
-            return Response({"error": "No submitted data has been scored yet, and the analysis report cannot be generated."}, status=400)
-
-        # 2. Aggregate statistical knowledge point scores and feedback summaries
-        kp_stats = {}
-        common_issues = []
-        total_score_sum = 0
-
-        for sub in best_submissions:
-            total_score_sum += float(sub.final_score or 0)
-            evaluation = sub.ai_evaluation
-
-            if evaluation.kp_scores and isinstance(evaluation.kp_scores, dict):
-                for kp_name, score in evaluation.kp_scores.items():
-                    if kp_name not in kp_stats:
-                        kp_stats[kp_name] = []
-                    try:
-                        kp_stats[kp_name].append(float(score))
-                    except (ValueError, TypeError):
-                        continue
-
-            # Feedback summaries are collected for use in the AI analysis context
-            if evaluation.feedback:
-                common_issues.append(evaluation.feedback[:80])
-
-        if not kp_stats:
-            return Response({"error": "Detailed knowledge point score details are missing in the existing submissions."}, status=400)
-
-        # 3. 📉 计算汇总指标
-        kp_summary = [f"- {name}: 平均 {round(sum(v) / len(v), 1)}分" for name, v in kp_stats.items()]
-        class_avg = round(total_score_sum / len(best_submissions), 1)
-
-        # 4. 🤖 调用 AI 进行教情诊断
-        scorer = AIScorer()
-        prompt = f"""
-            You are a senior Computer Science Professor. Analyze the class performance for the assignment: '{assignment.title}'.
-
-            [Statistical Data]
-            - Total Students (Best Attempts): {len(best_submissions)}
-            - Class Average: {class_avg}
-            - Knowledge Point Mastery: 
-            {chr(10).join(kp_summary)}
-
-            [Student Feedback Snippets]
-            {chr(10).join(common_issues[:10])}
-
-            [Task]
-            Based on the data, identify collective weaknesses and provide actionable teaching advice.
-
-            [Output Requirement]
-            Return ONLY a JSON object with:
-            - "analysis": A brief summary of class performance.
-            - "strengths": A list of 2 key areas where the class excelled.
-            - "weaknesses": A list of 2 key areas needing improvement.
-            - "suggestions": A list of 3 specific teaching adjustments for the next lecture.
-            """
-
-        try:
-            raw_res = scorer.ask(prompt)
-
-            import re
-            import json
-            clean_json = re.sub(r'```json\s?|\s?```', '', raw_res).strip()
-            insights = json.loads(clean_json)
-
+        # Check if there is an ongoing duplicate check
+        existing = PlagiarismReport.objects.filter(
+            assignment=assignment, status='pending'
+        ).first()
+        if existing:
             return Response({
-                "stats": {
-                    "count": len(best_submissions),
-                    "average": class_avg,
-                    "kp_mastery": {k: round(sum(v) / len(v), 1) for k, v in kp_stats.items()}
-                },
-                "ai_insights": insights
+                'report_id': existing.id,
+                'status': 'pending',
+                'message': 'A plagiarism check is already in progress'
             })
-        except Exception as e:
-            print(f"DEBUG TEACHING INSIGHTS ERROR: {str(e)}")
-            return Response({"error": "The AI analytics engine is temporarily unable to respond, please try again later."}, status=500)
+
+        # Creating report records
+        report = PlagiarismReport.objects.create(
+            assignment=assignment,
+            status='pending'
+        )
+
+        # Triggers an asynchronous task
+        async_plagiarism_check.delay(report.id, assignment.id)
+
+        return Response({
+            'report_id': report.id,
+            'status': 'pending',
+            'message': 'Plagiarism check started'
+        })
+
+    @action(detail=True, methods=['get'], url_path='plagiarism-results')
+    def plagiarism_results(self, request, pk=None):
+        """获取该作业的所有查重报告"""
+        assignment = self.get_object()
+        reports = PlagiarismReport.objects.filter(assignment=assignment)
+
+        data = []
+        for r in reports:
+            data.append({
+                'id': r.id,
+                'status': r.status,
+                'mode': r.mode,
+                'report_url': r.report_url,
+                'matches': r.matches,
+                'file_count': r.file_count,
+                'error_message': r.error_message,
+                'created_at': r.created_at.isoformat()
+            })
+
+        return Response(data)
+
+    @action(detail=True, methods=['post'], url_path='plagiarism-diff')
+    def plagiarism_diff(self, request, pk=None):
+        """代理获取 MOSS 对比详情页（避免前端 CORS 问题）"""
+        url_a = request.data.get('url_a', '')
+        url_b = request.data.get('url_b', '')
+
+        if not url_a or not url_b:
+            return Response({'error': 'Missing URLs'}, status=400)
+
+        import urllib.request
+        import re
+        import html as html_mod
+
+        files = []
+        for url in [url_a, url_b]:
+            try:
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    content = resp.read().decode('utf-8', errors='ignore')
+
+                title_match = re.search(r'<TITLE>(.*?)</TITLE>', content, re.IGNORECASE)
+                filename = title_match.group(1) if title_match else url.split('/')[-1]
+
+                pre_match = re.search(r'<PRE>(.*?)</PRE>', content, re.DOTALL | re.IGNORECASE)
+                if not pre_match:
+                    files.append({'filename': filename, 'lines': []})
+                    continue
+
+                pre_raw = pre_match.group(1)
+                raw_lines = pre_raw.split('\n')
+                processed_lines = []
+
+                in_font = False
+                for line in raw_lines:
+                    if '<FONT' in line.upper():
+                        in_font = True
+                    if '</FONT>' in line.upper():
+                        in_font = False
+                    clean_line = re.sub(r'<[^>]+>', '', line)
+                    clean_line = html_mod.unescape(clean_line)
+                    processed_lines.append({
+                        'code': clean_line,
+                        'matched': in_font
+                    })
+
+                files.append({'filename': filename, 'lines': processed_lines})
+
+            except Exception as e:
+                files.append({'filename': 'Error loading', 'lines': []})
+
+        return Response({'files': files})
 
 
 class KnowledgePointViewSet(viewsets.ModelViewSet):
@@ -1702,6 +1864,7 @@ class TeacherCourseViewSet(viewsets.ModelViewSet):
     queryset = Course.objects.all()
     serializer_class = CourseSerializer
     permission_classes = [IsTeacher]
+    pagination_class = PageNumberPagination
 
     def get_queryset(self):
         """
@@ -2579,6 +2742,177 @@ class SystemConfigViewSet(viewsets.ViewSet):
             return Response({"message": str(e)}, status=500)
 
 
+class AdminKnowledgePointViewSet(viewsets.ModelViewSet):
+    """管理员端：知识点库全局管理（含引用计数、导入导出）"""
+    queryset = KnowledgePoint.objects.all().order_by("-id")
+    serializer_class = KnowledgePointSerializer
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get_queryset(self):
+        qs = KnowledgePoint.objects.all()
+        # 按语言筛选
+        language = self.request.query_params.get('language')
+        if language:
+            qs = qs.filter(language__iexact=language)
+        # 按类型筛选 (L1/L2)
+        kp_type = self.request.query_params.get('type')
+        if kp_type == 'L1':
+            qs = qs.filter(is_system=True)
+        elif kp_type == 'L2':
+            qs = qs.filter(is_system=False)
+        return qs.order_by("-id")
+
+    @action(detail=False, methods=['get'], url_path='with-refs')
+    def list_with_references(self, request):
+        """返回所有 KP 及其被作业引用的次数"""
+        qs = self.get_queryset()
+        data = []
+        for kp in qs:
+            ref_count = Assignment.objects.filter(knowledge_points=kp).count()
+            data.append({
+                'id': kp.id,
+                'name': kp.name,
+                'description': kp.description,
+                'category': kp.category,
+                'is_system': kp.is_system,
+                'language': kp.language,
+                'course': kp.course_id,
+                'reference_count': ref_count
+            })
+        return Response(data)
+
+    @action(detail=False, methods=['get'], url_path='export')
+    def export_kps(self, request):
+        """导出所有知识点为 CSV"""
+        import csv
+        from django.http import HttpResponse
+        qs = self.get_queryset()
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = 'attachment; filename="knowledge_points.csv"'
+        writer = csv.writer(response)
+        writer.writerow(['name', 'description', 'category', 'is_system', 'language', 'course_id'])
+        for kp in qs:
+            writer.writerow([kp.name, kp.description, kp.category, kp.is_system, kp.language, kp.course_id or ''])
+        return response
+
+    @action(detail=False, methods=['post'], url_path='import')
+    def import_kps(self, request):
+        """从 CSV 文件批量导入知识点"""
+        import csv
+        import io
+        file = request.FILES.get('file')
+        if not file:
+            return Response({'error': 'No file uploaded'}, status=400)
+
+        try:
+            decoded = file.read().decode('utf-8-sig')
+            reader = csv.DictReader(io.StringIO(decoded))
+            created = 0
+            skipped = 0
+            for row in reader:
+                name = row.get('name', '').strip()
+                if not name:
+                    skipped += 1
+                    continue
+                # 去重检查
+                exists = KnowledgePoint.objects.filter(
+                    name__iexact=name,
+                    language__iexact=row.get('language', 'python'),
+                    course_id=row.get('course_id') or None
+                ).exists()
+                if exists:
+                    skipped += 1
+                    continue
+                KnowledgePoint.objects.create(
+                    name=name,
+                    description=row.get('description', ''),
+                    category=row.get('category', 'L2'),
+                    is_system=row.get('is_system', 'False').lower() == 'true',
+                    language=row.get('language', 'python'),
+                    course_id=row.get('course_id') or None
+                )
+                created += 1
+            return Response({'created': created, 'skipped': skipped})
+        except Exception as e:
+            return Response({'error': str(e)}, status=400)
+
+
+class AdminAIUsageStatsView(APIView):
+    """AI 用量统计面板：Token 消耗、响应时间、错误率、接口调用分布"""
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        from apps.analytics.models import AIServiceLog
+        from django.db.models import Sum, Avg, Count, Q
+        from django.db.models.functions import TruncDate
+        from django.utils import timezone
+        from datetime import timedelta
+
+        days = int(request.query_params.get('days', 30))
+        since = timezone.now() - timedelta(days=days)
+        logs = AIServiceLog.objects.filter(created_at__gte=since)
+
+        # 1. 总量统计
+        totals = logs.aggregate(
+            total_tokens=Sum('total_tokens'),
+            prompt_tokens=Sum('prompt_tokens'),
+            completion_tokens=Sum('completion_tokens'),
+            avg_response=Avg('response_time'),
+            total_calls=Count('id'),
+            error_count=Count('id', filter=Q(status_code__gte=400))
+        )
+
+        # 2. 按天趋势（Token 消耗 + 调用次数）
+        daily_trend = (
+            logs.annotate(day=TruncDate('created_at'))
+            .values('day')
+            .annotate(
+                total_tokens=Sum('total_tokens'),
+                calls=Count('id'),
+                errors=Count('id', filter=Q(status_code__gte=400))
+            )
+            .order_by('day')
+        )
+        trend_data = [
+            {
+                "date": item['day'].strftime('%m-%d'),
+                "total_tokens": item['total_tokens'] or 0,
+                "calls": item['calls'],
+                "errors": item['errors']
+            }
+            for item in daily_trend
+        ]
+
+        # 3. 按接口分布（饼图数据）
+        endpoint_dist = (
+            logs.values('endpoint')
+            .annotate(count=Count('id'), tokens=Sum('total_tokens'))
+            .order_by('-count')
+        )
+
+        # 4. 按接口平均响应时间
+        endpoint_latency = (
+            logs.values('endpoint')
+            .annotate(avg_time=Avg('response_time'))
+            .order_by('-avg_time')
+        )
+
+        return Response({
+            "totals": {
+                "total_tokens": totals['total_tokens'] or 0,
+                "prompt_tokens": totals['prompt_tokens'] or 0,
+                "completion_tokens": totals['completion_tokens'] or 0,
+                "avg_response": round(totals['avg_response'] or 0, 2),
+                "total_calls": totals['total_calls'] or 0,
+                "error_count": totals['error_count'] or 0,
+                "error_rate": round((totals['error_count'] or 0) / max(totals['total_calls'] or 1, 1) * 100, 1)
+            },
+            "daily_trend": trend_data,
+            "endpoint_distribution": list(endpoint_dist),
+            "endpoint_latency": list(endpoint_latency)
+        })
+
+
 class AdminDashboardStatsView(APIView):
     """
     Administrator end: Dashboard statistical data summary interface.
@@ -2825,6 +3159,79 @@ class AdminUserManagementViewSet(viewsets.ModelViewSet):
         return Response({"message": f"已驳回教师 {user.username} 的申请"})
 
 
+class AdminSystemHealthView(APIView):
+    """系统健康面板：Docker 容器资源 + Redis 缓存统计"""
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        import redis as redis_lib
+
+        # 1. Docker 容器资源
+        docker_stats = []
+        try:
+            import docker
+            client = docker.from_env()
+            containers = client.containers.list(all=True)
+            for c in containers[:10]:
+                stats_data = {}
+                if c.status == 'running':
+                    try:
+                        raw = c.stats(stream=False)
+                        # CPU
+                        cpu_delta = raw['cpu_stats']['cpu_usage']['total_usage'] - raw['precpu_stats']['cpu_usage']['total_usage']
+                        system_delta = raw['cpu_stats']['system_cpu_usage'] - raw['precpu_stats']['system_cpu_usage']
+                        num_cpus = raw['cpu_stats']['online_cpus']
+                        cpu_percent = (cpu_delta / system_delta * num_cpus * 100) if system_delta > 0 else 0
+
+                        # Memory
+                        mem_usage = raw['memory_stats'].get('usage', 0)
+                        mem_limit = raw['memory_stats'].get('limit', 1)
+                        mem_percent = (mem_usage / mem_limit * 100) if mem_limit > 0 else 0
+
+                        stats_data = {
+                            'cpu_percent': round(cpu_percent, 1),
+                            'mem_usage_mb': round(mem_usage / 1024 / 1024, 1),
+                            'mem_limit_mb': round(mem_limit / 1024 / 1024, 1),
+                            'mem_percent': round(mem_percent, 1)
+                        }
+                    except Exception:
+                        stats_data = {'cpu_percent': 0, 'mem_usage_mb': 0, 'mem_limit_mb': 0, 'mem_percent': 0}
+
+                docker_stats.append({
+                    'name': c.name,
+                    'status': c.status,
+                    'image': str(c.image.tags[0]) if c.image.tags else 'unknown',
+                    'stats': stats_data
+                })
+        except Exception as e:
+            docker_stats = [{'error': str(e)}]
+
+        # 2. Redis 缓存统计
+        redis_stats = {'status': 'offline'}
+        try:
+            r = redis_lib.Redis(host='127.0.0.1', port=6379, db=0, socket_timeout=2)
+            info = r.info()
+            hits = info.get('keyspace_hits', 0)
+            misses = info.get('keyspace_misses', 0)
+            total = hits + misses
+            redis_stats = {
+                'status': 'online',
+                'hits': hits,
+                'misses': misses,
+                'hit_rate': round(hits / total * 100, 1) if total > 0 else 0,
+                'used_memory': info.get('used_memory_human', 'N/A'),
+                'connected_clients': info.get('connected_clients', 0),
+                'total_keys': sum(r.dbsize() for _ in [0])
+            }
+        except Exception:
+            pass
+
+        return Response({
+            'docker_containers': docker_stats,
+            'redis': redis_stats
+        })
+
+
 class SystemMonitorView(APIView):
     """
     Administrator end: Full-stack system monitoring window.
@@ -3018,7 +3425,7 @@ class DockerManagementViewSet(viewsets.ViewSet):
     管理员端：Docker 沙箱基础设施监控与动态配置中心
     """
     # 建议此处使用你自定义的 IsAdminUser 权限，目前先用 IsAuthenticated 保证安全
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAdminUser]
 
     def _get_client(self):
         """内部工具方法：安全获取 Docker 客户端连接"""
