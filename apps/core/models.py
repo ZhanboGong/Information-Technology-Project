@@ -249,6 +249,15 @@ class Submission(models.Model):
 
 # 6. Docker Report Table
 class DockerReport(models.Model):
+    """
+    Model for storing raw execution results from the Docker sandbox.
+
+    Responsibilities:
+    1. Result Capture: Records exit codes and output streams (stdout/stderr).
+    2. Performance Profiling: Tracks total execution time in seconds.
+    3. Status Tracking: Distinguishes between successful runs, timeouts, or OOM (Out of Memory).
+    4. Compile Auditing: Specifically flags failures occurring during the build/compile phase.
+    """
     submission = models.OneToOneField('Submission', on_delete=models.CASCADE, related_name='docker_report')
     exit_code = models.IntegerField(null=True)
     stdout = models.TextField(null=True, blank=True)
