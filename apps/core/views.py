@@ -1925,9 +1925,9 @@ class TeacherCourseViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         """
-        Safely deletes a course while enforcing relational integrity and logging.
-        :param serializer: The DELETE request object.
-        :return: 204 No Content on success, or 400 Bad Request if integrity check fails.
+
+        :param serializer:
+        :return:
         """
         if self.request.user.role != 'admin':
             course = serializer.save(teacher=self.request.user)
@@ -1947,11 +1947,9 @@ class TeacherCourseViewSet(viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         """
-
-        :param request:
-        :param args:
-        :param kwargs:
-        :return:
+        Safely deletes a course while enforcing relational integrity and logging.
+        :param request: The DELETE request object.
+        :return: 204 No Content on success, or 400 Bad Request if integrity check fails.
         """
         instance = self.get_object()
         course_id = instance.id
@@ -2772,18 +2770,22 @@ class SystemConfigViewSet(viewsets.ViewSet):
 
 
 class AdminKnowledgePointViewSet(viewsets.ModelViewSet):
-    """管理员端：知识点库全局管理（含引用计数、导入导出）"""
+    """Administrator side: Global management of knowledge base (including reference counting, import and export)"""
     queryset = KnowledgePoint.objects.all().order_by("-id")
     serializer_class = KnowledgePointSerializer
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     def get_queryset(self):
+        """
+        Dynamically filters the knowledge base based on administrative search criteria.
+        :return: A filtered and ordered QuerySet.
+        """
         qs = KnowledgePoint.objects.all()
-        # 按语言筛选
+        # Filter by language
         language = self.request.query_params.get('language')
         if language:
             qs = qs.filter(language__iexact=language)
-        # 按类型筛选 (L1/L2)
+        # Filter by type (L1/L2)
         kp_type = self.request.query_params.get('type')
         if kp_type == 'L1':
             qs = qs.filter(is_system=True)
@@ -2793,7 +2795,11 @@ class AdminKnowledgePointViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='with-refs')
     def list_with_references(self, request):
-        """返回所有 KP 及其被作业引用的次数"""
+        """
+        Retrieves the global list of KPs with cross-assignment reference counts.
+        :param request: The incoming administrative GET request.
+        :return: Response containing KPs and their respective reference frequencies.
+        """
         qs = self.get_queryset()
         data = []
         for kp in qs:
@@ -2812,7 +2818,11 @@ class AdminKnowledgePointViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='export')
     def export_kps(self, request):
-        """导出所有知识点为 CSV"""
+        """
+        Exports the filtered knowledge base to a CSV file for backup or external editing.
+        :param request: The incoming administrative GET request.
+        :return: A downloadable CSV file attachment.
+        """
         import csv
         from django.http import HttpResponse
         qs = self.get_queryset()
@@ -2826,7 +2836,11 @@ class AdminKnowledgePointViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'], url_path='import')
     def import_kps(self, request):
-        """从 CSV 文件批量导入知识点"""
+        """
+        Performs bulk ingestion of Knowledge Points from a CSV file.
+        :param request: POST request containing the multipart/form-data CSV file.
+        :return: Success summary or detailed error message.
+        """
         import csv
         import io
         file = request.FILES.get('file')
@@ -2843,7 +2857,6 @@ class AdminKnowledgePointViewSet(viewsets.ModelViewSet):
                 if not name:
                     skipped += 1
                     continue
-                # 去重检查
                 exists = KnowledgePoint.objects.filter(
                     name__iexact=name,
                     language__iexact=row.get('language', 'python'),
