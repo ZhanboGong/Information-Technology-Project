@@ -530,6 +530,14 @@ class NotificationConfig(models.Model):
 
 
 class SystemOperationLog(models.Model):
+    """
+    Centralized Audit Logging Model.
+
+    Responsibilities:
+    1. Accountability: Records which administrator or teacher performed a specific action.
+    2. Forensic Analysis: Captures IP addresses and target identifiers for security reviews.
+    3. State Tracking: Provides a chronological history of system-wide modifications.
+    """
     user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, verbose_name="操作人")
     action = models.CharField(max_length=100, verbose_name="操作行为")
     target_type = models.CharField(max_length=50, verbose_name="目标类型") # 如 Assignment, User, Config
