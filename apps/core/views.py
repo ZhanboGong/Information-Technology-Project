@@ -3191,25 +3191,35 @@ class AdminUserManagementViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], url_path='reject')
     def reject_teacher(self, request, pk=None):
         """
-        管理员：驳回教师注册
+        Administrator: Rejects a teacher's registration request with a reason.
+
+        Workflow:
+        1. State Update: Moves the user's status to 'rejected' and persists the reason.
+        2. Notification: Dispatches an automated email to inform the user of the decision.
+        3. Audit: Logs the rejection event for administrative oversight.
         """
         user = self.get_object()
-        reason = request.data.get('reason', '提供的信息不完整或不符合规范。')
+        reason = request.data.get('reason', 'The information provided is incomplete or does not meet our requirements.')
 
         user.approval_status = 'rejected'
         user.rejected_reason = reason
         user.save()
 
-        # 发送驳回通知
-        subject = "【系统通知】您的教师账号申请审核未通过"
-        message = f"尊敬的 {user.username} 老师：\n\n很抱歉，您的账号申请未通过审核。\n原因：{reason}\n\n如有疑问请联系管理员。"
+        # Prepare the notification email
+        subject = "[System Notification] Your teacher account application was not approved"
+        message = (
+        f"Dear {user.username},\n\n"
+        f"We regret to inform you that your teacher account application has been rejected.\n"
+        f"Reason: {reason}\n\n"
+        f"If you have any questions, please contact the system administrator."
+    )
 
         try:
             send_mail(subject, message, settings.EMAIL_HOST_USER, [user.email])
         except Exception:
             pass
 
-        return Response({"message": f"已驳回教师 {user.username} 的申请"})
+        return Response({"message": f"Registration for teacher {user.username} has been rejected."})
 
 
 class AdminSystemHealthView(APIView):
