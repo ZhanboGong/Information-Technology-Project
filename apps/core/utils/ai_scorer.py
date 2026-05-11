@@ -21,7 +21,7 @@ class AIScorer:
     """
 
     def __init__(self):
-        # 初始化留空，利用下面的 @property 实现配置热更新
+        # Leave the initialization blank and use @property below to implement hot configuration updates
         pass
 
     @property
@@ -133,7 +133,7 @@ class AIScorer:
                 text += f"  Requirement: {item.get('description', '')}\n"
         return text
 
-    def evaluate_code(self, submission, docker_report, project_path=None):
+    def evaluate_code(self, submission, docker_report, project_path=None, static_report=None):
         """
         核心评价流水线：将执行事实转化为语义评估。
         """
@@ -162,10 +162,25 @@ class AIScorer:
         else:
             sandbox_evidence = f"✅ Execution Successful:\nSTDOUT: {docker_report.stdout or 'Empty'}\nSTDERR: {docker_report.stderr or 'None'}"
 
+        # 3.5 静态分析报告
+        if static_report and 'error' not in static_report:
+            summary = static_report.get('summary', static_report)
+            cc = summary.get('cyclomatic_complexity', {})
+            static_evidence = (
+                f"### Static Code Analysis (Objective Metrics):\n"
+                f"- Total Lines of Code: {summary.get('total_loc', summary.get('sloc', 'N/A'))}\n"
+                f"- Cyclomatic Complexity: avg={cc.get('average', 'N/A')}, max={cc.get('max', 'N/A')}\n"
+                f"- Maintainability Index: {summary.get('maintainability_index', 'N/A')}/100\n"
+                f"- Function/Method Count: {summary.get('function_count', summary.get('method_count', 'N/A'))}\n"
+                f"- Comment Ratio: {summary.get('comment_ratio', 'N/A')}%\n"
+            )
+        else:
+            static_evidence = "### Static Code Analysis: Not available"
+
         # 4. 构造深度评论 Prompt
         # 核心逻辑：强制 AI 在 kp_scores 中使用我们提供的标签
             # 4. 增强版深度评论 Prompt
-            prompt = f"""
+        prompt = f"""
                 You are a senior Software Engineering Mentor and Programming Instructor. 
                 Your goal is to provide a "Diagnostic and Growth-Oriented" feedback report for the student.
                 
@@ -174,7 +189,8 @@ class AIScorer:
 
                 ### 1. Execution Context (Facts):
                 {sandbox_evidence}
-
+                
+                {static_evidence}
                 ### 2. Strict Grading Standards (Rubric - Layer 3):
                 {self._build_rubric_description(rubric_config)}
 
@@ -184,18 +200,27 @@ class AIScorer:
 
                 ### 4. Student Source Code:
                 {source_code}
+                
+                ### 5. ANALYSIS PROCESS (think step by step before scoring):
+                Before outputting the final JSON, evaluate in order:
+                Step 1 - Compilation: Did the code compile? If not, identify the error and the line that caused it.
+                Step 2 - Execution: If compiled, did it run correctly? Analyze stdout/stderr for correctness.
+                Step 3 - Structure: Count functions/classes. Assess naming conventions, indentation, organization.
+                Step 4 - Knowledge Points: For each of {contexts['allowed_labels']}, did the student demonstrate it? Score 0-100.
+                Step 5 - Rubric Alignment: For each dimension in {custom_dim_names}, evaluate against the detailed rubric above.
+                Step 6 - Final Score: Calculate weighted total based on rubric weights.
 
-                ### 5. Review Instructions (FOR FEEDBACK):
+                ### 6. Review Instructions (FOR FEEDBACK):
                 Your "feedback" field MUST be written in professional Markdown and include the following sections:
-                - ## 🎯 Executive Summary: A 2-sentence overview of the submission quality.
-                - ## 🔍 Execution Analysis: Explain the sandbox results. Why did it pass or fail? Link it to specific lines of code.
-                - ## 💡 Logic & Design Deep-Dive: 
+                - ## Executive Summary: A 2-sentence overview of the submission quality.
+                - ## Execution Analysis: Explain the sandbox results. Why did it pass or fail? Link it to specific lines of code.
+                - ## Logic & Design Deep-Dive: 
                     - Analyze the use of {contexts['allowed_labels']}. 
                     - Did the student follow OOP principles or the required logic ({contexts['l3']})?
-                - ## 🛠️ Refactoring Suggestions: Provide 2-3 specific "Before vs After" logic improvements (use text descriptions or pseudocode snippets).
-                - ## 🌟 Best Practices: Mention one professional industry standard the student should aim for next.
+                - ## Refactoring Suggestions: Provide 2-3 specific "Before vs After" logic improvements (use text descriptions or pseudocode snippets).
+                - ## Best Practices: Mention one professional industry standard the student should aim for next.
 
-                ### 6. Scoring Constraints:
+                ### 7. Scoring Constraints:
                 1. **Detailed Scoring (scores)**: Keys MUST match: {custom_dim_names}.
                 2. **Statistical Mapping (stats_scores)**: Logic, Design, Style (0-100).
                 3. **Knowledge Profiling (kp_scores)**: Evaluate ONLY: {contexts['allowed_labels']}. Keys must match exactly.
@@ -208,6 +233,40 @@ class AIScorer:
                     "total_score": value,
                     "feedback": "...(Detailed Markdown Content)..."
                 }}
+                
+                ### 8. OUTPUT FORMAT EXAMPLE:
+                Here is a correctly formatted response:
+                
+                {{
+                    "scores": {{
+                        "Object-Oriented Programming (Parts 1-2)": 85,
+                        "Collections Management (Parts 3-5)": 80,
+                        "I/O Mechanism (Parts 6-7)": 75,
+                        "Accuracy & Efficiency": 85,
+                        "Concept Understanding": 90
+                    }},
+                    "stats_scores": {{
+                        "Logic": 85,
+                        "Design": 80,
+                        "Style": 85
+                    }},
+                    "kp_scores": {{
+                        "Interface Implementation": 90,
+                        "Class Inheritance and Polymorphism": 90,
+                        "Collections Framework (LinkedList, Comparator)": 80,
+                        "File I/O and Exception Handling": 75,
+                        "Data Encapsulation and Validation": 85
+                    }},
+                    "total_score": 82,
+                    "feedback": "## Executive Summary\\nThis submission demonstrates solid OOP understanding...\\n\\n## Execution Analysis\\nThe program executed successfully...\\n\\n## Logic & Design Deep-Dive\\n**Interface Implementation**: The Ride class fully implements RideInterface... (Score: 90)\\n**Class Inheritance and Polymorphism**: Excellent use of abstract class Person... (Score: 90)\\n\\n## Refactoring Suggestions\\n### 1. Fix checkVisitorFromHistory...\\n**Before:** ...\\n**After:** ...\\n\\n## Best Practices\\nConsider using dependency injection for file paths..."
+                }}
+
+                IMPORTANT RULES:
+                - scores keys MUST be exactly: {custom_dim_names}  (teacher's rubric dimensions)
+                - kp_scores keys MUST be exactly: {contexts['allowed_labels']}  (knowledge points)
+                - stats_scores keys are always: Logic, Design, Style
+                - total_score MUST be a number (not a string)
+                - All feedback MUST be in English
                 """
 
         start_time = time.time()
@@ -216,7 +275,15 @@ class AIScorer:
                 model=self.model,
                 messages=[
                     {"role": "system",
-                     "content": "You are a rigorous programming mentor. Output ONLY structured JSON data. All evaluation and feedback MUST be in English."},
+                     "content": """You are a rigorous programming mentor. Output ONLY structured JSON data. All evaluation and feedback MUST be in English.
+                     Core principles:
+                    1. FACT-BASED: Every score must trace back to evidence in the code or sandbox output.
+                    2. CONSTRUCTIVE: Feedback must help the student improve, not just list errors.
+                    3. CONSISTENT: Apply rubric dimensions equally across all submissions.
+                    Scoring scale: 0-100 per dimension.
+                    85+ = HD, 75-84 = D, 65-74 = C, 50-64 = P, <50 = F.
+                    Output ONLY a valid JSON object. No text outside the JSON."""},
+
                     {"role": "user", "content": prompt}
                 ],
                 response_format={'type': 'json_object'},
@@ -231,7 +298,24 @@ class AIScorer:
                     prompt_tokens=response.usage.prompt_tokens, completion_tokens=response.usage.completion_tokens,
                     total_tokens=response.usage.total_tokens, response_time=duration, status_code=200
                 )
-            return json.loads(response.choices[0].message.content)
+
+            raw = response.choices[0].message.content
+            result = json.loads(raw)
+
+            result.setdefault('scores', {})
+            result.setdefault('stats_scores', {"Logic": 0, "Design": 0, "Style": 0})
+            result.setdefault('kp_scores', {})
+            result.setdefault('total_score', 0)
+            result.setdefault('feedback', "AI evaluation did not generate feedback.")
+
+            return result
+
+        except json.JSONDecodeError as e:
+            duration = time.time() - start_time
+            AIServiceLog.objects.create(service_name='deepseek', endpoint='chat.completions/evaluate',
+                                        response_time=duration, status_code=500)
+            raise Exception(f"AI returned invalid JSON: {str(e)}")
+
         except Exception as e:
             duration = time.time() - start_time
             AIServiceLog.objects.create(service_name='deepseek', endpoint='chat.completions/evaluate',
@@ -268,3 +352,132 @@ class AIScorer:
             'l3': task_points,
             'allowed_labels': allowed
         }
+
+    def generate_learning_resources(self, assignment_title, category, feedback, kp_scores):
+        """
+
+        :param assignment_title:
+        :param category:
+        :param feedback:
+        :param kp_scores:
+        :return:
+        """
+        # 1. 提取薄弱点：优先找 <70 的，没有则取最低的 3 个
+        weak_areas = []
+        if isinstance(kp_scores, dict):
+            for k, v in kp_scores.items():
+                try:
+                    if float(v) < 70:
+                        weak_areas.append((k, float(v)))
+                except (ValueError, TypeError):
+                    continue
+
+        # 如果没有低于 70 的，取最低的 3 个
+        if not weak_areas and kp_scores and isinstance(kp_scores, dict):
+            sorted_kps = sorted(
+                [(k, float(v)) for k, v in kp_scores.items() if v is not None],
+                key=lambda x: x[1]
+            )
+            weak_areas = sorted_kps[:3]
+
+        if not weak_areas:
+            return []
+
+        # 按分数排序，最弱的在前，最多取 3 个
+        weak_areas.sort(key=lambda x: x[1])
+        weak_names = [name for name, _ in weak_areas[:3]]
+
+        # 2. 用 AI 为每个薄弱点生成 YouTube 搜索关键词
+        prompt = f"""
+        The student is weak in: {', '.join(weak_names)}.
+        Programming Language: {category}
+
+        For each weak area, generate a YouTube search query that would find a good tutorial video.
+        Keep queries short and specific (2-5 words).
+
+        Return a JSON array of objects, each with:
+        - "topic": the weak area name
+        - "query": the YouTube search query (e.g., "Java LinkedList tutorial")
+
+        Return ONLY a JSON array.
+        """
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "Output ONLY a JSON array."},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format={'type': 'json_object'},
+                temperature=0
+            )
+
+            import re, json
+            raw_res = response.choices[0].message.content
+            clean_json = re.sub(r'```json\s?|\s?```', '', raw_res).strip()
+            queries = json.loads(clean_json)
+
+            if isinstance(queries, dict):
+                for val in queries.values():
+                    if isinstance(val, list):
+                        queries = val
+                        break
+
+            if not isinstance(queries, list):
+                return []
+
+        except Exception as e:
+            print(f"AI query generation failed: {str(e)}")
+            return []
+
+        # 3. 调用 YouTube Data API 搜索视频
+        import requests as req
+        YOUTUBE_API_KEY = os.environ.get('YOUTUBE_API_KEY', '')
+
+        # 没有 API key 时降级为 YouTube 搜索页链接
+        if not YOUTUBE_API_KEY:
+            return [
+                {
+                    "title": f"Tutorial: {q.get('topic', 'Programming')}",
+                    "url": f"https://www.youtube.com/results?search_query={q.get('query', 'programming tutorial').replace(' ', '+')}",
+                    "reason": f"Video tutorial for {q.get('topic', 'this topic')}"
+                }
+                for q in queries[:3]
+            ]
+
+        final_resources = []
+        for q in queries[:3]:
+            search_query = q.get('query', '')
+            topic = q.get('topic', '')
+            if not search_query:
+                continue
+
+            try:
+                yt_response = req.get(
+                    "https://www.googleapis.com/youtube/v3/search",
+                    params={
+                        "part": "snippet",
+                        "q": f"{search_query} tutorial",
+                        "type": "video",
+                        "maxResults": 1,
+                        "key": YOUTUBE_API_KEY,
+                        "videoCategoryId": "28"
+                    },
+                    timeout=5
+                )
+                yt_data = yt_response.json()
+                items = yt_data.get('items', [])
+                if items:
+                    video_id = items[0]['id']['videoId']
+                    title = items[0]['snippet']['title']
+                    final_resources.append({
+                        "title": title,
+                        "url": f"https://www.youtube.com/watch?v={video_id}",
+                        "reason": f"Video tutorial for {topic}"
+                    })
+            except Exception as e:
+                print(f"YouTube API error for '{search_query}': {str(e)}")
+                continue
+
+        return final_resources
