@@ -133,7 +133,7 @@ class AIScorer:
                 text += f"  Requirement: {item.get('description', '')}\n"
         return text
 
-    def evaluate_code(self, submission, docker_report, project_path=None, static_report=None):
+    def evaluate_code(self, submission, docker_report, project_path=None, static_report=None, review_context=None):
         """
         核心评价流水线：将执行事实转化为语义评估。
         """
@@ -177,20 +177,41 @@ class AIScorer:
         else:
             static_evidence = "### Static Code Analysis: Not available"
 
+        # 3.6 接口合规检测（仅 Java 项目）
+        if is_java and project_path:
+            from apps.core.utils.static_analyzer import StaticAnalyzer
+            compliance = StaticAnalyzer.check_interface_compliance(project_path)
+            if compliance['issues']:
+                compliance_evidence = (
+                    f"### ⚠️ Structural Compliance Issues (CRITICAL):\n"
+                    f"The following required features are MISSING from the student's code:\n"
+                    + "\n".join(f"- ❌ {issue}" for issue in compliance['issues'])
+                    + "\nThese are REQUIREMENT GAPS, not style issues. Score affected dimensions accordingly.\n"
+                )
+            else:
+                compliance_evidence = "### Structural Compliance: All interfaces and methods implemented correctly."
+        else:
+            compliance_evidence = ""
+
         # 4. 构造深度评论 Prompt
         # 核心逻辑：强制 AI 在 kp_scores 中使用我们提供的标签
             # 4. 增强版深度评论 Prompt
         prompt = f"""
-                You are a senior Software Engineering Mentor and Programming Instructor. 
-                Your goal is to provide a "Diagnostic and Growth-Oriented" feedback report for the student.
+                You are a university programming instructor performing a fair and comprehensive assessment.
+                Your goal is to provide a balanced evaluation that accurately reflects the student's demonstrated competence.
                 
                 ### TARGET LENGTH: 
                 Your total feedback should be approximately 600-800 words, designed to perfectly fit one A4 page of technical documentation.
+                
+                ### 0. Assignment Requirements (CRITICAL - You MUST check every item):
+                {submission.assignment.content or "No specific requirements provided."}
 
                 ### 1. Execution Context (Facts):
                 {sandbox_evidence}
                 
                 {static_evidence}
+                
+                {compliance_evidence}
                 ### 2. Strict Grading Standards (Rubric - Layer 3):
                 {self._build_rubric_description(rubric_config)}
 
@@ -203,6 +224,44 @@ class AIScorer:
                 
                 ### 5. ANALYSIS PROCESS (think step by step before scoring):
                 Before outputting the final JSON, evaluate in order:
+                Step 0 - Requirement Completion Check (MANDATORY):
+                You have TWO independent sources of requirements. Check BOTH carefully.
+
+                **Source A — Explicit Requirements (Section 0):**
+                From the Assignment Requirements text, extract EVERY specific task, feature, or deliverable.
+                For each, compare against the Student Source Code (Section 4) and mark:
+                  ✅ FULLY IMPLEMENTED — feature is CORRECT, COMPLETE, and handles normal and edge cases
+                  ❌ NOT IMPLEMENTED — feature is completely missing
+                  ⚠️ PARTIALLY IMPLEMENTED — feature exists but is buggy, incomplete, or misses key logic
+
+                CRITICAL DISTINCTION — "PARTIALLY" vs "FULLY":
+                - If the code has a relevant function/class/method but the logic is flawed, mark ⚠️ PARTIALLY
+                - If the code mentions the concept but doesn't actually solve the problem, mark ⚠️ PARTIALLY  
+                - Only mark ✅ FULLY if you would give this feature at least a C-grade (65+) if graded in isolation
+
+                Source A implemented count = (count of ✅) + (count of ⚠️ × 0.5)
+
+                **Source B — Rubric Minimum Requirements (Section 2):**
+                Each dimension in the rubric has a P-level (Pass) description defining its MINIMUM standard.
+                For EACH rubric dimension, read its P-level description and determine:
+                  ✅ MEETS EXPECTATION — student's work satisfies at least the C-level (Credit) description in the rubric
+                  ❌ BELOW EXPECTATION — work only reaches P-level or below
+                
+                IMPORTANT: P-level means "barely passable." Only count a dimension as ✅ if the student 
+                demonstrates competence beyond the bare minimum — at least C-level. 
+                If the work only scrapes by at P-level, mark ❌.
+                Source B implemented count = count of ✅
+
+                **Combined Completion Rate:**
+                = (Source A implemented count + Source B implemented count)
+                  / (Source A total tasks + Source B total dimensions)
+                  × 100%
+
+                This combined rate captures both "did they do what was asked" (text requirements) 
+                AND "does each quality dimension demonstrate competence beyond bare minimum" (rubric C-level+).
+
+                IMPORTANT: Do NOT apply any score caps yourself. Simply report the completion_rate 
+                as a 0-100 integer. The scoring system applies caps automatically.
                 Step 1 - Compilation: Did the code compile? If not, identify the error and the line that caused it.
                 Step 2 - Execution: If compiled, did it run correctly? Analyze stdout/stderr for correctness.
                 Step 3 - Structure: Count functions/classes. Assess naming conventions, indentation, organization.
@@ -227,10 +286,11 @@ class AIScorer:
 
                 Return a strictly formatted JSON object:
                 {{
+                    "completion_rate": integer (0-100, from Step 0 analysis),
                     "scores": {{ ... }},
                     "stats_scores": {{ ... }},
                     "kp_scores": {{ ... }},
-                    "total_score": value,
+                    "total_score": value (one decimal, e.g. 85.9),
                     "feedback": "...(Detailed Markdown Content)..."
                 }}
                 
@@ -239,25 +299,25 @@ class AIScorer:
                 
                 {{
                     "scores": {{
-                        "Object-Oriented Programming (Parts 1-2)": 85,
-                        "Collections Management (Parts 3-5)": 80,
-                        "I/O Mechanism (Parts 6-7)": 75,
-                        "Accuracy & Efficiency": 85,
-                        "Concept Understanding": 90
+                        "Object-Oriented Programming (Parts 1-2)": 87.5,
+                        "Collections Management (Parts 3-5)": 82.0,
+                        "I/O Mechanism (Parts 6-7)": 78.5,
+                        "Accuracy & Efficiency": 85.0,
+                        "Concept Understanding": 90.0
                     }},
                     "stats_scores": {{
-                        "Logic": 85,
-                        "Design": 80,
-                        "Style": 85
+                        "Logic": 87.0,
+                        "Design": 82.5,
+                        "Style": 85.0
                     }},
                     "kp_scores": {{
-                        "Interface Implementation": 90,
-                        "Class Inheritance and Polymorphism": 90,
-                        "Collections Framework (LinkedList, Comparator)": 80,
-                        "File I/O and Exception Handling": 75,
-                        "Data Encapsulation and Validation": 85
+                        "Interface Implementation": 90.0,
+                        "Class Inheritance and Polymorphism": 88.0,
+                        "Collections Framework (LinkedList, Comparator)": 82.0,
+                        "File I/O and Exception Handling": 76.0,
+                        "Data Encapsulation and Validation": 85.5
                     }},
-                    "total_score": 82,
+                    "total_score": 85.5,
                     "feedback": "## Executive Summary\\nThis submission demonstrates solid OOP understanding...\\n\\n## Execution Analysis\\nThe program executed successfully...\\n\\n## Logic & Design Deep-Dive\\n**Interface Implementation**: The Ride class fully implements RideInterface... (Score: 90)\\n**Class Inheritance and Polymorphism**: Excellent use of abstract class Person... (Score: 90)\\n\\n## Refactoring Suggestions\\n### 1. Fix checkVisitorFromHistory...\\n**Before:** ...\\n**After:** ...\\n\\n## Best Practices\\nConsider using dependency injection for file paths..."
                 }}
 
@@ -265,9 +325,23 @@ class AIScorer:
                 - scores keys MUST be exactly: {custom_dim_names}  (teacher's rubric dimensions)
                 - kp_scores keys MUST be exactly: {contexts['allowed_labels']}  (knowledge points)
                 - stats_scores keys are always: Logic, Design, Style
-                - total_score MUST be a number (not a string)
+                - total_score MUST be a number with one decimal place (e.g. 85.9, not 86)
+                - total_score MUST be calculated from the weighted average of scores dimensions, NOT copied from any example
+                - completion_rate MUST be an integer (0-100) reflecting actual requirement completion from Step 0
                 - All feedback MUST be in English
                 """
+        if review_context:
+            issues_text = "\n".join(f"- {i}" for i in review_context.get('issues', []))
+            suggestion_text = review_context.get('suggestion', '')
+            review_block = f"""
+
+                        ### ⚠️ QUALITY REVIEW: The previous scoring attempt was flagged for the following issues:
+                        {issues_text}
+
+                        Review Instruction: {suggestion_text}
+                        Please re-evaluate carefully and correct the inconsistencies.
+                        """
+            prompt += review_block
 
         start_time = time.time()
         try:
@@ -275,13 +349,27 @@ class AIScorer:
                 model=self.model,
                 messages=[
                     {"role": "system",
-                     "content": """You are a rigorous programming mentor. Output ONLY structured JSON data. All evaluation and feedback MUST be in English.
-                     Core principles:
-                    1. FACT-BASED: Every score must trace back to evidence in the code or sandbox output.
-                    2. CONSTRUCTIVE: Feedback must help the student improve, not just list errors.
-                    3. CONSISTENT: Apply rubric dimensions equally across all submissions.
-                    Scoring scale: 0-100 per dimension.
-                    85+ = HD, 75-84 = D, 65-74 = C, 50-64 = P, <50 = F.
+                     "content": """You are a senior university programming instructor. Output ONLY structured JSON data. All evaluation and feedback MUST be in English.
+
+                    SCORING METHOD — THIS IS THE MOST IMPORTANT RULE:
+                    Score each rubric dimension by matching the student's work against the teacher's rubric levels 
+                    provided in Section 2 (HD / D / C / P / F descriptions).
+                    
+                    For EACH dimension:
+                    1. Read the rubric level descriptions (HD, D, C, P, F) provided by the teacher.
+                    2. Determine which level best describes the student's work.
+                    3. Assign a score within that level's range:
+                       - Clearly meets HD criteria → 85-100
+                       - Clearly meets D criteria → 75-84
+                       - Clearly meets C criteria → 65-74
+                       - Clearly meets P criteria → 50-64
+                       - Does not meet P criteria → below 50
+                    4. If the student's work is between two levels, score at the higher level's lower bound.
+                    
+                    CORE PRINCIPLES:
+                    1. YOUR SCORE MUST TRACE TO THE RUBRIC: Every number you give must match a specific rubric level. If you cannot justify it from the rubric, you scored wrong.
+                    2. DO NOT INVENT YOUR OWN CRITERIA: Do not deduct points for things not in the rubric (e.g., missing comments if rubric doesn't mention comments).
+                    
                     Output ONLY a valid JSON object. No text outside the JSON."""},
 
                     {"role": "user", "content": prompt}
@@ -305,10 +393,116 @@ class AIScorer:
             result.setdefault('scores', {})
             result.setdefault('stats_scores', {"Logic": 0, "Design": 0, "Style": 0})
             result.setdefault('kp_scores', {})
-            result.setdefault('total_score', 0)
             result.setdefault('feedback', "AI evaluation did not generate feedback.")
 
+
+            # --- Step 0: 完成度强制封顶（确定性规则）---
+            completion_rate = result.get('completion_rate', 100)
+            try:
+                completion_rate = int(completion_rate)
+            except (ValueError, TypeError):
+                completion_rate = 100
+                # --- 交叉修正：KP 均分低于 80 时，按比例校正完成度虚高 ---
+            kp_values = [float(v) for v in result.get('kp_scores', {}).values() if v is not None]
+            if kp_values:
+                kp_avg = sum(kp_values) / len(kp_values)
+                if kp_avg < 80:
+                    penalty = kp_avg / 80
+                    adjusted = round(completion_rate * penalty)
+                    completion_rate = min(completion_rate, adjusted)
+
+            if completion_rate >= 85:
+                score_ceiling = 100
+            elif completion_rate >= 70:
+                score_ceiling = 85
+            elif completion_rate >= 55:
+                score_ceiling = 75
+            elif completion_rate >= 35:
+                score_ceiling = 60
+            else:
+                score_ceiling = 45
+
+            # 封顶：每个维度和总分都不能超过天花板
+            result['completion_rate'] = completion_rate
+
+
+
+            # ============================================
+            # 分数计算流水线（三层联动）
+            # 1. 合规检测 → 修正 KP 分数
+            # 2. KP 分数 → 影响 Rubric 维度分数
+            # 3. Rubric 加权 → 最终 total_score
+            # ============================================
+            scores_dict = result.get('scores', {})
+            kp_scores = result.get('kp_scores', {})
+            rubric_items = submission.assignment.rubric_config.get('items', [])
+
+            # --- Step 1: 合规检测修正 KP 分数 ---
+            if is_java and project_path:
+                from apps.core.utils.static_analyzer import StaticAnalyzer
+                compliance = StaticAnalyzer.check_interface_compliance(project_path)
+                if compliance['issues']:
+                    for issue in compliance['issues']:
+                        # 未实现接口 → 相关 KP 直接压低
+                        if 'No class implements' in issue or 'does NOT implement' in issue:
+                            for kp_name in kp_scores:
+                                if any(kw in kp_name.lower() for kw in
+                                       ['interface', 'implementation', 'polymorphism']):
+                                    kp_scores[kp_name] = 15.0
+                        # 缺失方法 → 对应 KP 扣分
+                        elif 'missing method' in issue:
+                            for kp_name in kp_scores:
+                                if any(kw in kp_name.lower() for kw in
+                                       ['collection', 'exception', 'i/o', 'file']):
+                                    kp_scores[kp_name] = min(float(kp_scores.get(kp_name, 50)), 30)
+                    result['feedback'] += "\n\n---\n## ⚠️ Structural Compliance Report\n"
+                    for issue in compliance['issues']:
+                        result['feedback'] += f"- {issue}\n"
+
+            # --- 灾难性缺陷检测：任一 KP < 30 直压上限 ---
+            kp_values_for_check = [float(v) for v in kp_scores.values() if v is not None]
+            if kp_values_for_check and min(kp_values_for_check) < 30:
+                completion_rate = min(completion_rate, 54)
+                score_ceiling = min(score_ceiling, 60)
+
+
+
+            # --- Step 2: KP 分数影响 Rubric 维度分数 ---
+            if kp_scores and rubric_items:
+                kp_values = [float(v) for v in kp_scores.values() if v is not None]
+                kp_avg = sum(kp_values) / len(kp_values) if kp_values else 70
+
+                for item in rubric_items:
+                    dim_name = item.get('criterion', '')
+                    ai_score = float(scores_dict.get(dim_name, 70))
+                    # 混合：70% AI 判断 + 30% KP 客观证据
+                    KP_WEIGHT = 0.20
+                    blended = ai_score * (1 - KP_WEIGHT) + kp_avg * KP_WEIGHT
+                    scores_dict[dim_name] = round(blended, 1)
+
+            # --- Step 3: Rubric 加权计算最终总分 ---
+            if scores_dict and rubric_items:
+                # 先封顶每个维度
+                for item in rubric_items:
+                    dim_name = item.get('criterion', '')
+                    dim_score = float(scores_dict.get(dim_name, 0))
+                    scores_dict[dim_name] = round(min(dim_score, score_ceiling), 1)
+
+                # 再加权计算总分
+                weighted_sum = 0
+                for item in rubric_items:
+                    dim_name = item.get('criterion', '')
+                    weight = item.get('weight', 0) / 100.0
+                    dim_score = float(scores_dict.get(dim_name, 0))
+                    weighted_sum += dim_score * weight
+                result['total_score'] = round(weighted_sum, 1)
+                result['total_score'] = min(result['total_score'], score_ceiling)
+
+            else:
+                result['total_score'] = result.get('total_score', 0)
+
             return result
+
 
         except json.JSONDecodeError as e:
             duration = time.time() - start_time
@@ -362,42 +556,66 @@ class AIScorer:
         :param kp_scores:
         :return:
         """
-        # 1. 提取薄弱点：优先找 <70 的，没有则取最低的 3 个
-        weak_areas = []
+        # 1. 按分数分级推荐（个性化数量）
+        recommendations = []
         if isinstance(kp_scores, dict):
             for k, v in kp_scores.items():
                 try:
-                    if float(v) < 70:
-                        weak_areas.append((k, float(v)))
+                    score = float(v)
                 except (ValueError, TypeError):
                     continue
+                if score < 60:
+                    recommendations.append((k, score, 3))  # 弱项：推荐 3 个
+                elif score < 80:
+                    recommendations.append((k, score, 1))  # 中等：推荐 1 个
 
-        # 如果没有低于 70 的，取最低的 3 个
-        if not weak_areas and kp_scores and isinstance(kp_scores, dict):
-            sorted_kps = sorted(
-                [(k, float(v)) for k, v in kp_scores.items() if v is not None],
-                key=lambda x: x[1]
-            )
-            weak_areas = sorted_kps[:3]
-
-        if not weak_areas:
+        # 没有需要推荐的
+        if not recommendations:
             return []
 
         # 按分数排序，最弱的在前，最多取 3 个
-        weak_areas.sort(key=lambda x: x[1])
-        weak_names = [name for name, _ in weak_areas[:3]]
+        recommendations.sort(key=lambda x: x[1])
+        recommendations = recommendations[:3]
 
-        # 2. 用 AI 为每个薄弱点生成 YouTube 搜索关键词
+        # 2. 获取 Bloom 层级
+        BLOOM_ORDER = ['remember', 'understand', 'apply', 'analyze', 'evaluate', 'create']
+        kp_bloom_map = {}
+        try:
+            from apps.core.models import KnowledgePoint
+            assigned_kps = KnowledgePoint.objects.filter(
+                name__in=[r[0] for r in recommendations]
+            )
+            for kp in assigned_kps:
+                kp_bloom_map[kp.name] = kp.bloom_level
+        except Exception:
+            pass
+
+        # 3. 构造带 Bloom 层级的推荐 Prompt
+        weak_details = []
+        for name, score, count in recommendations:
+            current_bloom = kp_bloom_map.get(name, 'apply')
+            current_idx = BLOOM_ORDER.index(current_bloom) if current_bloom in BLOOM_ORDER else 2
+            next_bloom = BLOOM_ORDER[min(current_idx + 1, len(BLOOM_ORDER) - 1)]
+            weak_details.append(
+                f"- {name} (Score: {score:.1f}, Current Level: {current_bloom}, "
+                f"Target Level: {next_bloom}, Recommend: {count} resources)"
+            )
+
         prompt = f"""
-        The student is weak in: {', '.join(weak_names)}.
-        Programming Language: {category}
+        The student has weak areas in: {category}
 
-        For each weak area, generate a YouTube search query that would find a good tutorial video.
-        Keep queries short and specific (2-5 words).
+        {chr(10).join(weak_details)}
+
+        For each weak area listed above, note the "Count" value — generate that many YouTube search queries targeting the "Target Level" Bloom's taxonomy tier.
+
+        For each resource:
+        1. Generate a YouTube search query for the target Bloom's level.
+        2. Briefly describe what a target-level exercise looks like for this topic.
 
         Return a JSON array of objects, each with:
         - "topic": the weak area name
-        - "query": the YouTube search query (e.g., "Java LinkedList tutorial")
+        - "query": the YouTube search query
+        - "bloom_target": the target Bloom's level from the details above
 
         Return ONLY a JSON array.
         """
@@ -441,7 +659,8 @@ class AIScorer:
                 {
                     "title": f"Tutorial: {q.get('topic', 'Programming')}",
                     "url": f"https://www.youtube.com/results?search_query={q.get('query', 'programming tutorial').replace(' ', '+')}",
-                    "reason": f"Video tutorial for {q.get('topic', 'this topic')}"
+                    "reason": f"Video tutorial for {q.get('topic', 'this topic')}",
+                    "bloom_target": q.get('bloom_target', '')
                 }
                 for q in queries[:3]
             ]
@@ -474,7 +693,8 @@ class AIScorer:
                     final_resources.append({
                         "title": title,
                         "url": f"https://www.youtube.com/watch?v={video_id}",
-                        "reason": f"Video tutorial for {topic}"
+                        "reason": f"Video tutorial for {topic}",
+                        "bloom_target": q.get('bloom_target', '')
                     })
             except Exception as e:
                 print(f"YouTube API error for '{search_query}': {str(e)}")
