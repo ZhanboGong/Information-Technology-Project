@@ -65,7 +65,7 @@ class AnalyticsViewSet(viewsets.ViewSet):
             course = Course.objects.get(id=pk)
             assignments = Assignment.objects.filter(course=course).order_by('created_at')
 
-            # 1. 作业成绩历史趋势 (取每生最高分)
+            # 1. Historical trend of assignment score (take the highest score of each student)
             trend = []
             for asm in assignments:
                 student_best_scores = Submission.objects.filter(
@@ -83,7 +83,7 @@ class AnalyticsViewSet(viewsets.ViewSet):
                     "score": round(float(avg_score), 1)
                 })
 
-            # 2. 每日递交活跃度
+            # 2. Daily submission activity
             two_weeks_ago = timezone.now() - timedelta(days=14)
             daily_stats = Submission.objects.filter(
                 assignment__course=course,
@@ -92,7 +92,7 @@ class AnalyticsViewSet(viewsets.ViewSet):
 
             submission_trend = [{"date": item['day'].strftime('%m-%d'), "count": item['count']} for item in daily_stats]
 
-            # 3. 技能雷达
+            # 3. Skill radar
             all_evals = AIEvaluation.objects.filter(submission__assignment__course=course,
                                                     is_published=True).select_related('submission')
             kp_mastery = {}
@@ -108,8 +108,7 @@ class AnalyticsViewSet(viewsets.ViewSet):
                 sorted_items = sorted(raw_averages.items(), key=lambda x: x[1])
                 processed_radar = dict(sorted_items[:4] + sorted_items[-4:])
 
-            # --- 4. 🚀 关键修复：汇总平均分计算 ---
-            # 仅针对已经有成绩的作业计算总平均分，过滤掉无人提交的作业（0分项）
+            # --- 4. Summary mean score calculation ---
             valid_scores = [t['score'] for t in trend if t['score'] > 0]
             total_avg = sum(valid_scores) / len(valid_scores) if valid_scores else 0
 
@@ -279,8 +278,8 @@ class AnalyticsViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'], url_path='knowledge-heatmap')
     def knowledge_heatmap(self, request):
         """
-        知识点掌握度热力图：作业维度 × 知识点维度的二维矩阵。
-        每个作业只取最高分的那条评估记录。
+        Heatmap of knowledge point mastery degree: two-dimensional matrix of task dimension × knowledge point dimension.
+        Only the assessment record with the highest score is taken for each assignment.
         """
         user = request.user
         evals = AIEvaluation.objects.filter(
@@ -295,7 +294,7 @@ class AnalyticsViewSet(viewsets.ViewSet):
         all_kps = set()
         matrix = []
 
-        # 按作业分组，每个作业只取最高分的那条
+        # Grouping by Assignment, each job takes only the one with the highest score
         seen_assignments = {}
         for ev in evals:
             asm_id = ev.submission.assignment.id
@@ -326,8 +325,8 @@ class AnalyticsViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'], url_path='course-ranking')
     def course_ranking(self, request):
         """
-        学生在每门课程中的排名。
-        算法：每个作业取该学生的最高分，然后算课程均值，按均值排名。
+        The rank of the students in each course.
+        Algorithm: For each assignment, take the student's highest score, then calculate the course mean, and rank by the mean.
         """
         from apps.core.models import Course, Submission
         from django.db.models import Max
@@ -337,12 +336,12 @@ class AnalyticsViewSet(viewsets.ViewSet):
 
         rankings = []
         for course in courses:
-            # 获取该课程下所有作业
+            # Get all assignments for this course
             assignments = course.assignments.all()
             if not assignments.exists():
                 continue
 
-            # 获取该课程下所有学生的每个作业最高分
+            # Get the highest score for each assignment for all students in the course
             student_best = Submission.objects.filter(
                 assignment__course=course,
                 status='completed'
@@ -350,7 +349,7 @@ class AnalyticsViewSet(viewsets.ViewSet):
                 best=Max('final_score')
             )
 
-            # 按学生分组，计算课程均值
+            # Group by student and calculate course mean
             from collections import defaultdict
             student_scores = defaultdict(list)
             for item in student_best:
@@ -362,10 +361,10 @@ class AnalyticsViewSet(viewsets.ViewSet):
                 avg = sum(scores) / len(scores) if scores else 0
                 student_avgs.append({"student_id": sid, "avg": round(avg, 1), "assignment_count": len(scores)})
 
-            # 按均值降序排列
+            # Calculate the course mean for each student
             student_avgs.sort(key=lambda x: x['avg'], reverse=True)
 
-            # 找到当前学生的排名
+            # Find the rank of the current student
             rank = 0
             my_avg = 0
             my_assignments = 0
@@ -378,7 +377,7 @@ class AnalyticsViewSet(viewsets.ViewSet):
                     break
 
             if rank == 0:
-                continue  # 该学生没有提交记录
+                continue
 
             percentile = round((1 - rank / total_students) * 100, 1) if total_students > 0 else 0
 
@@ -398,8 +397,8 @@ class AnalyticsViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'], url_path='kp-growth-trend')
     def kp_growth_trend(self, request):
         """
-        每个知识点的分数变化趋势（按作业时间排序）。
-        前端可用于绘制多折线图。
+        Trend of score change for each knowledge point (sorted by assignment time).
+        The front end can be used to draw multi-line charts.
         """
         user = request.user
         evals = AIEvaluation.objects.filter(
@@ -410,8 +409,8 @@ class AnalyticsViewSet(viewsets.ViewSet):
         if not evals.exists():
             return Response({"labels": [], "series": {}})
 
-        labels = []  # x 轴：作业名
-        series = {}  # 每个知识点一条线
+        labels = []  # X-axis: job name
+        series = {}  # One line per knowledge point
 
         for ev in evals:
             title = ev.submission.assignment.title
