@@ -34,22 +34,19 @@ def run_grading_task(submission_id, temp_workspace, entry_point=None):
     try:
         pipeline = GradingPipeline(submission_id)
 
-        # 🚀 核心修复：无论 entry_point 是否有值，都必须传入 work_dir (即 temp_workspace)
-        # 这样当 entry_point 为 None 时，Pipeline 内部的搜索逻辑才能在 temp_workspace 里找到代码文件
         pipeline.run_full_pipeline(entry_point=entry_point, work_dir=temp_workspace)
 
     except Exception as e:
         print(f"🚨 Celery Task Error: {str(e)}")
     finally:
-        # 无论成功失败，清理临时目录
+        # Regardless of success or failure, clean up the temporary directory
         if temp_workspace and os.path.exists(temp_workspace):
             shutil.rmtree(temp_workspace, ignore_errors=True)
             print(f" Temporary directory cleared: {temp_workspace}")
 
 
-# ---------------------------------------------------------
+
 # 任务 2: 全局动态通知调度器 (由 Celery Beat 每分钟触发)
-# ---------------------------------------------------------
 @shared_task
 def check_deadlines_and_send_reports():
     """
@@ -90,9 +87,8 @@ def check_deadlines_and_send_reports():
             )
 
 
-# ---------------------------------------------------------
+
 # 任务 3: 生成并发送详细成绩报告邮件 (配置适配版)
-# ---------------------------------------------------------
 @shared_task(bind=True, max_retries=3)
 def send_assignment_deadline_report(self, assignment_id, subject_template=None):
     """
@@ -215,27 +211,27 @@ Generated at: {timezone.now().strftime('%Y-%m-%d %H:%M:%S')}
 )
 def async_generate_teaching_insights(self, assignment_id):
     """
-    异步教情诊断任务：
-    1. 聚合班级最高分数据
-    2. 计算知识点掌握度汇总
-    3. 调用 AI 教授模型进行深度诊断
-    4. 将结果持久化到 TeachingInsightReport 表
+    Asynchronous teaching situation diagnosis task:
+    1. Aggregate the highest class score
+    2. Calculate the summary of mastery degree of knowledge points
+    3. Call the AI professor model for deep diagnosis
+    4. Persist the results to the TeachingInsightReport table
     """
     print("\n" + "=" * 30)
     print(f"🔥 WORKER IS ACTUALLY RUNNING: {assignment_id}")
     print("=" * 30 + "\n")
     report = None
     try:
-        # --- 初始化：获取对象并标记状态 ---
+        # Initialize: Get the object and mark the state
         print(f"🚀 [TASK START] Processing Assignment ID: {assignment_id}")
         assignment = Assignment.objects.get(id=assignment_id)
 
-        # 获取或创建报告记录
+        # Get or create a report record
         report, _ = TeachingInsightReport.objects.get_or_create(assignment=assignment)
         report.status = 'pending'
         report.save()
 
-        # --- 1. 数据聚合逻辑 (基于内存去重，确保统计的是每位学生的最优表现) ---
+        # 1. Data aggregation logic (based on memory deduplication to ensure that the statistics are the best performance of each student)
         all_subs = Submission.objects.filter(
             assignment=assignment,
             status='completed'
@@ -255,7 +251,7 @@ def async_generate_teaching_insights(self, assignment_id):
             report.save()
             return "No submissions found"
 
-        # --- 2. 统计指标计算 ---
+        # 2. Calculation of statistical indicators
         kp_stats = {}
         common_issues = []
         total_score_sum = 0
@@ -264,18 +260,18 @@ def async_generate_teaching_insights(self, assignment_id):
             total_score_sum += float(sub.final_score or 0)
             evaluation = sub.ai_evaluation
 
-            # 聚合知识点得分
+            # Aggregate knowledge point scores
             if evaluation.kp_scores and isinstance(evaluation.kp_scores, dict):
                 for kp_name, score in evaluation.kp_scores.items():
                     if kp_name not in kp_stats:
                         kp_stats[kp_name] = []
                     kp_stats[kp_name].append(float(score))
 
-            # 收集反馈片段用于 AI 上下文
+            # Feedback segments are collected for use in the AI context
             if evaluation.feedback:
                 common_issues.append(evaluation.feedback[:300])
 
-        # 格式化知识点汇总
+        # Format summaries of knowledge points
         kp_summary_text = []
         for name, v in kp_stats.items():
             avg_v = round(sum(v) / len(v), 1)
@@ -287,7 +283,7 @@ def async_generate_teaching_insights(self, assignment_id):
             )
         class_avg = round(total_score_sum / len(best_submissions), 1)
 
-        # --- 3. 🤖 调用 AI (灵魂 Prompt) ---
+        # 3. Call AI (Prompt)
         scorer = AIScorer()
         prompt = f"""
         You are a senior Computer Science Professor. Analyze the class performance for the assignment: '{assignment.title}'.
@@ -317,9 +313,8 @@ def async_generate_teaching_insights(self, assignment_id):
         raw_res = scorer.ask(prompt)
         print("✅ [TASK] AI Scorer Responded!")
 
-        # --- 4. 健壮的 JSON 解析逻辑 ---
+        # 4. Robust JSON parsing logic
         try:
-            # 这里的正则比 re.sub 更强，它会抓取第一个 { 和最后一个 } 之间的内容
             json_match = re.search(r'\{.*\}', raw_res, re.DOTALL)
             if json_match:
                 clean_json_str = json_match.group()
@@ -329,23 +324,22 @@ def async_generate_teaching_insights(self, assignment_id):
             insights = json.loads(clean_json_str)
         except Exception as json_err:
             print(f"❌ [TASK] JSON Parse Error: {str(json_err)}")
-            # 即使解析失败，也手动构造一个结构，防止状态卡在 pending
             insights = {
                 "analysis": "AI response format error — please review raw data below.",
                 "strengths": ["Data parsing failed"],
                 "weaknesses": ["Data parsing failed"],
                 "suggestions": ["Please click 'Analyze' again to retry."],
-                "raw_data": raw_res[:200]  # 记录前200个字备查
+                "raw_data": raw_res[:200]
             }
 
-        # --- 5. 数据持久化回填 ---
+        # 5. Data persistence backfill
         report.stats_data = {
             "count": len(best_submissions),
             "average": class_avg,
             "kp_mastery": {k: round(sum(v) / len(v), 1) for k, v in kp_stats.items()}
         }
         report.ai_insights = insights
-        report.status = 'ready'  # 🚀 关键：标记为 ready 才会停止轮询
+        report.status = 'ready'
         report.save()
 
         print(f"🎉 [TASK SUCCESS] Report updated for {assignment.title}")
@@ -356,14 +350,13 @@ def async_generate_teaching_insights(self, assignment_id):
         if report:
             report.status = 'error'
             report.save()
-        # 异常重试逻辑
         raise self.retry(exc=e, countdown=60)
 
 def _aggregate_by_student(raw_matches):
-    """将文件级对比聚合为学生级分析"""
+    """File-level comparisons were aggregated into student-level analyses"""
     from collections import defaultdict
 
-    # 1. 按学生对聚合
+    # 1. Aggregated by student pairs
     student_pairs = defaultdict(lambda: {'similarity_sum': 0, 'count': 0, 'max_similarity': 0, 'files': []})
 
     for m in raw_matches:
@@ -384,7 +377,7 @@ def _aggregate_by_student(raw_matches):
             'detail_urls': m.get('detail_urls', {})
         })
 
-    # 2. 计算每个学生对的平均相似度
+    # 2. The average similarity was calculated for each student pair
     aggregated = []
     for (a, b), data in student_pairs.items():
         avg_sim = round(data['similarity_sum'] / data['count'], 1) if data['count'] > 0 else 0
@@ -399,7 +392,7 @@ def _aggregate_by_student(raw_matches):
 
     aggregated.sort(key=lambda x: x['max_similarity'], reverse=True)
 
-    # 3. 生成学生风险排名
+    # 3. Generate student risk rankings
     student_risk = defaultdict(lambda: {'high': 0, 'medium': 0, 'low': 0, 'total_pairs': 0})
     for pair in aggregated:
         for s in [pair['student_a'], pair['student_b']]:
@@ -434,7 +427,7 @@ def _aggregate_by_student(raw_matches):
 
 @shared_task(bind=True, max_retries=2)
 def async_plagiarism_check(self, report_id, assignment_id):
-    """异步代码查重任务"""
+    """Asynchronous code duplication tasks"""
     from .models import PlagiarismReport, Submission
     from .utils.moss_checker import MOSSChecker
 
@@ -442,7 +435,6 @@ def async_plagiarism_check(self, report_id, assignment_id):
     try:
         assignment = Assignment.objects.get(id=assignment_id)
 
-        # 收集每个学生的最优提交
         submissions = Submission.objects.filter(
             assignment=assignment, status='completed'
         ).order_by('student', '-final_score', '-id').select_related('student')
@@ -460,7 +452,6 @@ def async_plagiarism_check(self, report_id, assignment_id):
                 file_path = sub.file.path
                 filename = os.path.basename(file_path)
 
-                # ZIP 文件：解压提取源码
                 if filename.lower().endswith('.zip'):
                     try:
                         with zipfile.ZipFile(file_path, 'r') as zf:
@@ -471,7 +462,6 @@ def async_plagiarism_check(self, report_id, assignment_id):
                                     best_subs.append((safe_name, code))
                     except Exception:
                         continue
-                # 单个源码文件：直接读取
                 elif filename.lower().endswith(('.py', '.java')):
                     try:
                         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -485,17 +475,14 @@ def async_plagiarism_check(self, report_id, assignment_id):
             report.save()
             return
 
-        # 执行查重
         checker = MOSSChecker()
         result = checker.check_plagiarism(best_subs, language=assignment.category)
 
-        # 持久化结果
         report.mode = result.get('mode')
         report.report_url = result.get('report_url')
         raw_matches = result.get('matches', [])
         report.file_count = result.get('file_count', 0)
 
-        # 学生级别聚合分析
         report.matches = _aggregate_by_student(raw_matches)
         report.status = 'completed'
         report.save()

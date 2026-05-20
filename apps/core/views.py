@@ -125,7 +125,7 @@ def register_teacher(request):
 @api_view(['POST'])
 @permission_classes([permissions.AllowAny])
 def request_password_reset(request):
-    """发送密码重置链接"""
+    """Send password reset link"""
     from django.core.cache import cache
     import uuid
 
@@ -151,7 +151,7 @@ def request_password_reset(request):
 @api_view(['POST'])
 @permission_classes([permissions.AllowAny])
 def confirm_password_reset(request):
-    """确认密码重置"""
+    """Confirm Password reset"""
     from django.core.cache import cache
 
     token = request.data.get('token', '')
@@ -253,7 +253,7 @@ def export_assignment_grades(request, assignment_id):
             "学号": student.student_id_num or "无",
             "姓名": student.username,
             "班级": student.class_name or "无",
-            "小组": group_display,  # 🚀 修正：更清晰的状态展示
+            "小组": group_display,
             "总分": submission.final_score if submission else "未提交"
         }
 
@@ -263,7 +263,6 @@ def export_assignment_grades(request, assignment_id):
 
             if evaluation and evaluation.ai_raw_feedback:
                 try:
-                    # 🚀 增加：清洗 AI 可能带出的 Markdown 标签
                     import re
                     clean_str = re.sub(r'```json|```', '', evaluation.ai_raw_feedback).strip()
                     raw_json = json.loads(clean_str)
@@ -281,7 +280,6 @@ def export_assignment_grades(request, assignment_id):
 
     df = pd.DataFrame(data)
 
-    # 🚀 修正：将 "小组" 加入到列排序中
     columns = ["学号", "姓名", "班级", "小组", "总分"] + rubric_names
     df = df.reindex(columns=columns)
 
@@ -303,7 +301,7 @@ def get_global_assignment_reminders(request):
     now = timezone.now()
     one_week_later = now + timedelta(days=7)
 
-    # 1. 获取该学生所有课程中一周内截止的作业
+    # 1. Get assignments due within a week for all of the student's courses
     upcoming_assignments = Assignment.objects.filter(
         course__students=user,
         deadline__range=(now, one_week_later)
@@ -311,26 +309,24 @@ def get_global_assignment_reminders(request):
 
     reminders = []
     for assignment in upcoming_assignments:
-        # --- 🚀 核心修改：小组感知的提交判定 ---
         if assignment.is_group:
-            # 找到学生在当前课程所属的小组
+            # Find the group to which the student belongs in the current course
             user_group = Group.objects.filter(course=assignment.course, members=user).first()
             if user_group:
-                # 只要该小组有任何“非失败”的提交，该组所有成员都不再提醒
+                # As long as the group has any "non-failed" submission, all members of the group will no longer alert
                 has_submitted = Submission.objects.filter(
                     group=user_group,
                     assignment=assignment
                 ).exclude(status='failed').exists()
             else:
-                # 要求组队但还没加入小组，必须继续提醒
+                # Request to form a team but have not yet joined the group, must continue to remind
                 has_submitted = False
         else:
-            # 个人作业：保持原逻辑
+            # Personal assignment: Keep the original logic
             has_submitted = Submission.objects.filter(
                 student=user,
                 assignment=assignment
             ).exclude(status='failed').exists()
-        # --- 🚀 修改结束 ---
 
         if not has_submitted:
             time_delta = assignment.deadline - now
@@ -345,7 +341,7 @@ def get_global_assignment_reminders(request):
                 "days_left": days_left,
                 "hours_left": hours_left,
                 "category": assignment.category,
-                "is_group": assignment.is_group  # 返回此标识，方便前端显示“小组”图标
+                "is_group": assignment.is_group
             })
 
     reminders.sort(key=lambda x: x['deadline'])
@@ -397,7 +393,7 @@ class MyTokenObtainPairView(TokenObtainPairView):
         username = request.data.get('username', '')
         cache_key = f'login_attempts:{username}:{ip}'
 
-        # 检查是否被锁定
+        # Check if it is locked
         attempts = cache.get(cache_key, 0)
         if attempts >= 5:
             ttl = cache.ttl(cache_key)
@@ -410,11 +406,11 @@ class MyTokenObtainPairView(TokenObtainPairView):
 
         try:
             response = super().post(request, *args, **kwargs)
-            # 登录成功
+            # Login success
             cache.delete(cache_key)
             return response
         except Exception:
-            # 登录失败（DRF 会处理 401 响应，我们只负责计数）
+            # Login failure
             cache.set(cache_key, attempts + 1, timeout=3600)
             raise
 
@@ -636,14 +632,11 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         """
-        删除作业逻辑：确保数据安全与逻辑一致性
+        Remove job logic: Ensure data security and logical consistency
         """
         instance = self.get_object()
         assign_id = instance.id
         assign_title = instance.title
-        # 1. 安全检查：使用更健壮的检查方式
-        # 无论你是否定义了 related_name，instance.submissions 都能根据你的配置灵活调整
-        # 如果你确定没改 related_name，submission_set 也是对的
         has_submissions = Submission.objects.filter(assignment=instance).exists()
 
         if has_submissions:
@@ -653,7 +646,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
                          "just modify the deadline to close the assignment."
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        # 2. 使用事务确保删除过程安全
+        # Use transactions to secure the deletion process
         try:
             with transaction.atomic():
                 self.perform_destroy(instance)
@@ -742,7 +735,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
             sub.final_score = new_score
             sub.save(update_fields=['final_score'])
 
-            # 重新聚合该学生在该作业下的历史最高分
+            # Reaggregate the student's all-time high score for that assignment
             highest = AIEvaluation.objects.filter(
                 submission__student=sub.student,
                 submission__assignment=sub.assignment
@@ -772,7 +765,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'], url_path='suggest-kps')
     def suggest_knowledge_points(self, request):
-        """AI 智能推荐 L2 知识点（CoT + 已有 KP 上下文注入 + 模糊去重）。"""
+        """AI intelligence recommends L2 knowledge points (CoT + existing KP context injection + fuzzy deduplication)."""
         title = request.data.get('title', '')
         content = request.data.get('content', '')
         language = request.data.get('language', 'python')
@@ -784,7 +777,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         if not course_id:
             return Response({"error": "Course ID is required to generate L2 Knowledge Points."}, status=400)
 
-        # 1. 查询已有知识点上下文（限 15 条，控制 token 用量）
+        # 1. Query the context of existing knowledge points (limit 15, control the amount of tokens)
         existing_l1 = KnowledgePoint.objects.filter(
             is_system=True, language__iexact=language
         )[:15]
@@ -808,7 +801,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         for kp in list(existing_l1) + list(existing_l2):
             existing_kp_names.add(kp.name.lower().strip())
 
-        # 2. 构建 Rubric 描述
+        # 2. Build the Rubric description
         rubric_desc = ""
         rubric_items = rubric_config.get('items', []) if rubric_config else []
         if rubric_items:
@@ -817,7 +810,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
                 rubric_lines.append(f"- {item.get('criterion')} (Weight: {item.get('weight')}%)")
             rubric_desc = "\n".join(rubric_lines)
 
-        # 3. 构造带 CoT 的 Prompt
+        # 3. Construct Prompt with CoT
         truncated_content = content[:2000]
         rubric_text = rubric_desc or "Standard coding practices"
 
@@ -859,7 +852,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         scorer = AIScorer()
 
         try:
-            # 4. 调用 AI + JSON 解析
+            # 4. Call AI + JSON parsing
             raw_res = scorer.ask(prompt)
 
             json_match = re.search(r'\{.*\}', raw_res, re.DOTALL)
@@ -869,7 +862,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
                 clean_json = raw_res.replace('```json', '').replace('```', '').strip()
             suggestions = json.loads(clean_json)
 
-            # 5. 去重 + 持久化
+            # 5. Deduplication + persistence
             course_obj = Course.objects.get(id=course_id)
             final_suggestions = []
 
@@ -879,7 +872,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
                 if not kp_name:
                     continue
 
-                # 精确匹配
+                # Exact matching
                 existing = KnowledgePoint.objects.filter(
                     name__iexact=kp_name,
                     course=course_obj,
@@ -895,12 +888,12 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
                     })
                     continue
 
-                # 模糊去重
+                # Fuzzy deduplication
                 name_lower = kp_name.lower().strip()
                 if name_lower in existing_kp_names:
                     continue
 
-                # 创建新 KP
+                # Create a new KP
                 bloom = kp_data.get('bloom_level', 'apply').lower().strip()
                 if bloom not in ['remember', 'understand', 'apply', 'analyze', 'evaluate', 'create']:
                     bloom = 'apply'
@@ -937,7 +930,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'], url_path='suggest-rubric')
     def suggest_rubric(self, request):
         """
-        AI 智能生成作业评分标准矩阵（带 CoT + 权重自动归一化 + 健壮 JSON 解析）。
+        AI intelligently generates job scoring criteria matrix (with CoT + weight auto-normalization + robust JSON parsing).
         """
         title = request.data.get('title', 'New Assignment')
         content = request.data.get('content', '')
@@ -948,7 +941,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
         scorer = AIScorer()
 
-        # 带 CoT 的 Prompt
+        # Prompt with CoT
         prompt_lines = [
             "You are an expert Computer Science Professor.",
             "Design a professional grading rubric matrix for the following programming assignment.",
@@ -984,7 +977,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         try:
             raw_res = scorer.ask(prompt)
 
-            # 健壮 JSON 解析
+            # Robust JSON parsing
             json_match = re.search(r'\{.*\}', raw_res, re.DOTALL)
             if json_match:
                 clean_json = json_match.group()
@@ -992,7 +985,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
                 clean_json = raw_res.replace('```json', '').replace('```', '').strip()
             rubric_data = json.loads(clean_json)
 
-            # 校验 + 自动归一化权重
+            # Validate + automatically normalize weights
             items = rubric_data.get('rubric', {}).get('items', [])
             if items:
                 total_w = sum(item.get('weight', 0) for item in items)
@@ -1000,7 +993,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
                     scale = 100 / total_w
                     for item in items:
                         item['weight'] = round(item.get('weight', 0) * scale)
-                    # 修正四舍五入误差
+                    # Correct the rounding error
                     new_total = sum(item['weight'] for item in items)
                     if new_total != 100 and items:
                         max_item = max(items, key=lambda x: x['weight'])
@@ -1735,10 +1728,10 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'], url_path='teaching-insights')
     def get_teaching_insights(self, request, pk=None):
         """
-        AI Teaching Insights (异步版本):
-        1. 检查是否已有缓存报告 → 直接返回
-        2. 没有则触发 Celery 异步任务 → 返回 pending 状态
-        3. 前端轮询直到 status 为 ready
+        AI Teaching Insights (asynchronous version):
+        1. Check if there is already a cache report → Return directly
+        2. If not, the Celery asynchronous task → returns pending
+        3. The frontends poll until status is ready
         """
         from .models import TeachingInsightReport
 
@@ -1747,7 +1740,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         # Support forced regenerate via ?regenerate=true
         if request.query_params.get('regenerate') == 'true':
             TeachingInsightReport.objects.filter(assignment=assignment).delete()
-        # 1. 检查是否已有缓存报告
+        # 1. Check if a cache report already exists
         try:
             report = TeachingInsightReport.objects.get(assignment=assignment)
             if report.status == 'ready':
@@ -1759,16 +1752,16 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
             elif report.status == 'pending':
                 return Response({"status": "pending", "message": "AI is analyzing, please wait..."})
             elif report.status == 'error':
-                # 报告生成失败，重新触发
+                # Report generation failed, retrigger
                 report.delete()
         except TeachingInsightReport.DoesNotExist:
             pass
 
-        # 2. 没有报告，触发异步任务
+        # 2. No report, asynchronous task is triggered
         from .tasks import async_generate_teaching_insights
         async_generate_teaching_insights.delay(assignment.id)
 
-        # 创建 pending 状态的记录
+        # Create a record of pending status
         TeachingInsightReport.objects.get_or_create(
             assignment=assignment,
             defaults={'status': 'pending'}
@@ -1934,42 +1927,37 @@ class KnowledgePointViewSet(viewsets.ModelViewSet):
 
 class GroupViewSet(viewsets.ModelViewSet):
     """
-    小组管理视图集：支持组建、加入、查看小组成员
+    暂不使用
     """
     queryset = Group.objects.all()
     serializer_class = GroupSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        # 仅查看当前用户参与的小组，或当前课程下的小组
         course_id = self.request.query_params.get('course')
         if course_id:
             return Group.objects.filter(course_id=course_id)
         return Group.objects.filter(members=self.request.user)
 
     def perform_create(self, serializer):
-        # 创建者自动成为组长并加入成员列表
         group = serializer.save(leader=self.request.user)
         group.members.add(self.request.user)
 
     @action(detail=False, methods=['post'], url_path='join-by-code')
     def join_by_code(self, request):
         """
-        学生输入邀请码加入小组
+        Students enter the invitation code to join the group
         """
         code = request.data.get('invite_code', '').strip().upper()
         if not code:
-            return Response({"error": "请输入小组邀请码"}, status=400)
+            return Response({"error": "Please enter the group invitation code"}, status=400)
 
         try:
             group = Group.objects.get(invite_code=code)
 
-            # 1. 校验人数上限（从该小组关联课程的作业中获取约束，或使用通用约束）
-            # 简单起见，这里可以校验 Group 成员数
             if group.members.count() >= 10:  # 假设硬上限10人，或者你可以去查 Assignment
                 return Response({"error": "小组人数已满"}, status=400)
 
-            # 2. 校验是否已在当前课程的其他小组里
             if Group.objects.filter(course=group.course, members=request.user).exists():
                 return Response({"error": "你已在当前课程的其他小组中，无法重复加入"}, status=400)
 
@@ -2503,7 +2491,7 @@ class StudentSubmissionViewSet(viewsets.ModelViewSet):
             assignment = Assignment.objects.get(id=assignment_id)
             student = request.user
 
-            # 用于小组身份的识别
+            # Used for group identification
             target_group = None
             if assignment.is_group:
                 target_group = Group.objects.filter(course=assignment.course, members=student).first()
@@ -2514,7 +2502,7 @@ class StudentSubmissionViewSet(viewsets.ModelViewSet):
             if not assignment.course.students.filter(id=student.id).exists():
                 return Response({"error": "You are not authorized to submit this assessment"}, status=403)
 
-            # 小组作业提交次数逻辑
+            # Group assignment submission times logic
             submission_filter = {"assignment": assignment}
             if assignment.is_group:
                 submission_filter["group"] = target_group
@@ -3610,7 +3598,6 @@ class DockerManagementViewSet(viewsets.ViewSet):
         """
         [Management] Dynamically reads or updates DockerRunner resource constraints.
         """
-        # 利用你 model 里的 get_config() 自动获取单例配置
         config = SystemConfiguration.get_config()
 
         if request.method == 'GET':

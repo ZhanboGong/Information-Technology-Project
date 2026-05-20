@@ -57,10 +57,9 @@ class CourseSerializer(serializers.ModelSerializer):
     student_count = serializers.IntegerField(source='students.count', read_only=True)
     teacher_name = serializers.ReadOnlyField(source='teacher.username')
 
-    # 稍微调整：去掉定义层级的 default，改在逻辑层处理或由 ViewSet 处理
     teacher = serializers.PrimaryKeyRelatedField(
         queryset=User.objects.filter(role='teacher'),
-        required=False,  # 允许不传（由 ViewSet 自动补全）
+        required=False,
         allow_null=True
     )
 
@@ -397,7 +396,6 @@ class UserProfileSerializer(serializers.ModelSerializer):
             self.fields['username'].read_only = True
 
     def validate_password(self, value):
-        # 🚀 这里的 validate_password 会自动去 settings 查找 AUTH_PASSWORD_VALIDATORS
         try:
             validate_password(value)
         except exceptions.ValidationError as e:
@@ -428,39 +426,39 @@ class SystemConfigurationSerializer(serializers.ModelSerializer):
         read_only_fields = ['id']
 
     def validate_docker_mem_limit(self, value):
-        """验证内存限制格式：512m, 1g, 1024k"""
+        """Verify memory limit format: 512m, 1g, 1024k"""
         if not re.match(r'^\d+[kmg]?$', str(value).lower()):
             raise serializers.ValidationError("内存限制格式无效。请使用数字加单位（如 '512m', '1g'）。")
         return value
 
     def validate_docker_cpu_quota(self, value):
-        """验证 CPU 配额：0.1核 - 4核"""
+        """Verify CPU quota: 0.1 core - 4 cores"""
         if value < 100000000:
-            raise serializers.ValidationError("CPU 配额过低，可能导致容器无法启动。")
+            raise serializers.ValidationError("If the CPU quota is too low, the container may not start.")
         if value > 4000000000:
-            raise serializers.ValidationError("CPU 配额超出系统预设的安全上限（最高 4 核）。")
+            raise serializers.ValidationError("CPU quota exceeds the system's preset safety limit (up to 4 cores).")
         return value
 
     def validate_docker_pids_limit(self, value):
-        """🚀 新增：验证最大进程数"""
+        """Verify the maximum number of processes"""
         if value < 10 or value > 500:
-            raise serializers.ValidationError("最大进程数限制需在 10 到 500 之间。")
+            raise serializers.ValidationError("The maximum number of processes should be between 10 and 500.")
         return value
 
     def validate_docker_timeout(self, value):
-        """验证超时时间"""
+        """Verify the timeout"""
         try:
             timeout_val = int(value)
             if timeout_val < 5 or timeout_val > 300:
-                raise serializers.ValidationError("超时时间必须在 5 到 300 秒之间。")
+                raise serializers.ValidationError("The timeout must be between 5 and 300 seconds.")
             return timeout_val
         except (ValueError, TypeError):
-            raise serializers.ValidationError("超时时间必须是一个有效的整数。")
+            raise serializers.ValidationError("The timeout must be a valid integer.")
 
     def validate_deepseek_api_key(self, value):
-        """验证 API Key 健壮性"""
+        """Verify API Key robustness"""
         if not value or len(value.strip()) < 10:
-            raise serializers.ValidationError("无效的 DeepSeek API Key。")
+            raise serializers.ValidationError("Invalid DeepSeek API Key.")
         return value
 
 

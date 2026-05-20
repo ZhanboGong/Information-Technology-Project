@@ -13,27 +13,27 @@ class IsApprovedTeacher(permissions.BasePermission):
     def has_permission(self, request, view):
         user = request.user
 
-        # 1. 必须是已登录用户
+        # 1. Must be a logged-in user
         if not user or not user.is_authenticated:
             return False
 
-        # 2. 如果是管理员，直接放行
+        # 2. Admin
         if user.role == 'admin' or user.is_superuser:
             return True
 
-        # 3. 如果是教师，检查审核状态
+        # 3. If it is a teacher, check the audit status
         if user.role == 'teacher':
-            # 只有审核通过且账号激活的老师才能访问
+            # Only teachers who have approved and activated their accounts can access it
             return user.is_active and user.approval_status == 'approved'
 
-        # 4. 如果是学生，访问教师接口会被拒绝
+        # 4. If it is a student, access to the teacher interface is denied
         return False
 
 
 class IsStudent(permissions.BasePermission):
     """
-    仅允许角色为学生的用户访问。
-    由于学生是导入的，默认状态就是 approved。
+    Allow access only to users whose role is student.
+    Since students are imported, the default state is approved.
     """
 
     def has_permission(self, request, view):

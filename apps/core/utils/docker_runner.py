@@ -76,8 +76,6 @@ class DockerRunner:
         abs_file_path = os.path.abspath(file_path)
         ext = os.path.splitext(abs_file_path)[1].lower()
 
-        # 如果提供了 project_root（通常是项目模式），则以项目根目录为挂载点；
-        # 如果未提供（通常是单文件模式），则以文件所在目录为挂载点。
         effective_root = os.path.abspath(project_root if project_root else os.path.dirname(abs_file_path))
 
         # Security and restricted configuration
@@ -94,11 +92,8 @@ class DockerRunner:
 
         if ext == '.py':
             image = "python:3.9-slim"
-            # 计算相对于挂载根目录的路径
             rel_path = os.path.relpath(abs_file_path, effective_root).replace("\\", "/")
 
-            # 如果 rel_path 包含 ".."，说明文件计算出的相对路径超出了挂载根目录的范围，
-            # 这会导致容器找不到文件。此时强制取文件名（Basename），因为文件必然在 /workspace 顶层。
             if ".." in rel_path:
                 rel_path = os.path.basename(abs_file_path)
 
@@ -121,7 +116,6 @@ class DockerRunner:
             try:
                 result = container.wait(timeout=config.docker_timeout)# 25
                 exit_code = result.get("StatusCode", 0)
-                # 获取最后 2000 行日志，防止内存溢出
                 output = container.logs(tail=2000).decode('utf-8', errors='replace')
             except Exception:
                 if container: container.kill()

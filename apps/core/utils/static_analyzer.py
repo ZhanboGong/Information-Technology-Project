@@ -109,7 +109,7 @@ class StaticAnalyzer:
             methods = re.findall(r'(?:public|private|protected|static|\s)+[\w<>\[\]]+\s+(\w+)\s*\(', code)
             method_count = len(methods)
 
-            # 嵌套深度（简化：计算最大缩进层级）
+            # 嵌套深度
             max_depth = 0
             for line in code_lines:
                 stripped = line.lstrip()

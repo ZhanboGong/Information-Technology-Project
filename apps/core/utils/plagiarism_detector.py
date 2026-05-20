@@ -4,7 +4,7 @@ import difflib
 
 class PlagiarismTransformer(ast.NodeTransformer):
     """
-    归一化转换器：将代码中的具体标识符转换为通用占位符
+    现改为使用Moss
     """
 
     def visit_Name(self, node):
@@ -55,12 +55,10 @@ class PlagiarismDetector:
         利用 Python 内置的 difflib (基于 Gestalt Pattern Matching 算法)
         比对两份结构指纹的重合度。
         """
-        # 预处理：去除无关紧要的空格
         f1 = cls.get_code_fingerprint(code1)
         f2 = cls.get_code_fingerprint(code2)
 
         if not f1 or not f2:
             return 0.0
 
-        # 计算比率：0.0 代表完全不同，1.0 代表结构完全一致
         return difflib.SequenceMatcher(None, f1, f2).ratio()

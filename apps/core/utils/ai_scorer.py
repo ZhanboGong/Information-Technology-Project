@@ -15,9 +15,9 @@ class AIScorer:
     """
     Intelligent Code Review Engine Based on DeepSeek Large Model.
 
-    核心理念：评价对齐教学。
-    通过动态注入老师在数据库中预设的三层知识维度，结合 Docker 沙箱运行事实，
-    实现对学生代码的精准、客观评价。
+    Core Idea: Evaluating alignment teaching.
+    By dynamically injecting the three-layer knowledge dimension preset by the teacher in the database, combined with the fact that the Docker sandbox is running,
+    To achieve accurate and objective evaluation of student code.
     """
 
     def __init__(self):
@@ -49,8 +49,8 @@ class AIScorer:
 
     def ask(self, prompt):
         """
-        通用 AI 问答接口，用于辅助任务（如入口识别、结构分析）。
-        内置流量监控日志。
+        A general AI question answering interface for auxiliary tasks (e.g., entry identification, structure analysis).
+        Built-in traffic monitoring log.
         """
         if not self.api_key:
             raise ValueError("API Key is missing in System Configuration.")
@@ -91,7 +91,7 @@ class AIScorer:
 
     def _read_project_source(self, project_path):
         """
-        深度扫描项目源码，支持多编码感知读取。
+        Deep scanning of project source code, supporting multi-encoder-aware reading.
         """
         full_source = ""
         supported_exts = ('.py', '.java', '.c', '.cpp')
@@ -115,7 +115,7 @@ class AIScorer:
 
     def _build_rubric_description(self, rubric_config):
         """
-        将 Layer 3 动态评分量表解析为 Markdown 指令。
+        The Layer 3 dynamic rating scale is parsed into Markdown instructions.
         """
         if not rubric_config or 'items' not in rubric_config:
             return "Grade based on general programming best practices and clean code standards."
@@ -135,12 +135,12 @@ class AIScorer:
 
     def evaluate_code(self, submission, docker_report, project_path=None, static_report=None, review_context=None):
         """
-        核心评价流水线：将执行事实转化为语义评估。
+        Core evaluation Pipeline: Transforming execution facts into semantic evaluations.
         """
         is_java = submission.file.name.endswith(('.java', '.zip'))
         lang_name = "Java" if is_java else "Python"
 
-        # 1. 获取源码
+        # 1. Getting the source code
         if submission.sub_type == 'archive' and project_path:
             source_code = self._read_project_source(project_path)
         else:
@@ -150,13 +150,13 @@ class AIScorer:
             except:
                 source_code = "Unable to read source code content."
 
-        # 2. 准备精准上下文与量表配置
+        # 2. Prepare precise context and scale configuration
         contexts = self.get_rag_contexts(submission)
         rubric_config = submission.assignment.rubric_config
         custom_dim_names = [i.get('criterion') for i in rubric_config.get('items', [])] if rubric_config.get(
             'items') else ["Logic", "Design", "Style"]
 
-        # 3. 构造沙箱事实证据
+        # 3. Construct sandbox fact evidence
         if not docker_report.compile_status:
             sandbox_evidence = f"🚨 Compilation Failed: The code did not compile successfully.\nError:\n{docker_report.stdout}"
         elif docker_report.exit_code != 0:
@@ -164,7 +164,7 @@ class AIScorer:
         else:
             sandbox_evidence = f"✅ Execution Successful:\nSTDOUT: {docker_report.stdout or 'Empty'}\nSTDERR: {docker_report.stderr or 'None'}"
 
-        # 3.5 静态分析报告
+        # 3.5 Static analysis report
         if static_report and 'error' not in static_report:
             summary = static_report.get('summary', static_report)
             cc = summary.get('cyclomatic_complexity', {})
@@ -179,7 +179,7 @@ class AIScorer:
         else:
             static_evidence = "### Static Code Analysis: Not available"
 
-        # 3.6 接口合规检测（仅 Java 项目）
+        # 3.6 Interface Compliance Checking (Java project only)
         if is_java and project_path:
             from apps.core.utils.static_analyzer import StaticAnalyzer
             compliance = StaticAnalyzer.check_interface_compliance(project_path)
@@ -195,9 +195,7 @@ class AIScorer:
         else:
             compliance_evidence = ""
 
-        # 4. 构造深度评论 Prompt
-        # 核心逻辑：强制 AI 在 kp_scores 中使用我们提供的标签
-            # 4. 增强版深度评论 Prompt
+        # 4. Construct the deep comment Prompt
         prompt = f"""
                 You are a university programming instructor performing a fair and comprehensive assessment.
                 Your goal is to provide a balanced evaluation that accurately reflects the student's demonstrated competence.
@@ -421,13 +419,11 @@ class AIScorer:
             result.setdefault('feedback', "AI evaluation did not generate feedback.")
 
 
-            # --- Step 0: 完成度强制封顶（确定性规则）---
             completion_rate = result.get('completion_rate', 100)
             try:
                 completion_rate = int(completion_rate)
             except (ValueError, TypeError):
                 completion_rate = 100
-                # --- 交叉修正：KP 均分低于 80 时，按比例校正完成度虚高 ---
             kp_values = [float(v) for v in result.get('kp_scores', {}).values() if v is not None]
             if kp_values:
                 kp_avg = sum(kp_values) / len(kp_values)
@@ -447,34 +443,22 @@ class AIScorer:
             else:
                 score_ceiling = 45
 
-            # 封顶：每个维度和总分都不能超过天花板
             result['completion_rate'] = completion_rate
 
-
-
-            # ============================================
-            # 分数计算流水线（三层联动）
-            # 1. 合规检测 → 修正 KP 分数
-            # 2. KP 分数 → 影响 Rubric 维度分数
-            # 3. Rubric 加权 → 最终 total_score
-            # ============================================
             scores_dict = result.get('scores', {})
             kp_scores = result.get('kp_scores', {})
             rubric_items = submission.assignment.rubric_config.get('items', [])
 
-            # --- Step 1: 合规检测修正 KP 分数 ---
             if is_java and project_path:
                 from apps.core.utils.static_analyzer import StaticAnalyzer
                 compliance = StaticAnalyzer.check_interface_compliance(project_path)
                 if compliance['issues']:
                     for issue in compliance['issues']:
-                        # 未实现接口 → 相关 KP 直接压低
                         if 'No class implements' in issue or 'does NOT implement' in issue:
                             for kp_name in kp_scores:
                                 if any(kw in kp_name.lower() for kw in
                                        ['interface', 'implementation', 'polymorphism']):
                                     kp_scores[kp_name] = 15.0
-                        # 缺失方法 → 对应 KP 扣分
                         elif 'missing method' in issue:
                             for kp_name in kp_scores:
                                 if any(kw in kp_name.lower() for kw in
@@ -484,13 +468,11 @@ class AIScorer:
                     for issue in compliance['issues']:
                         result['feedback'] += f"- {issue}\n"
 
-            # --- 灾难性缺陷检测：任一 KP < 30 直压上限 ---
             kp_values_for_check = [float(v) for v in kp_scores.values() if v is not None]
             if kp_values_for_check and min(kp_values_for_check) < 30:
                 completion_rate = min(completion_rate, 54)
                 score_ceiling = min(score_ceiling, 60)
 
-            # --- Step 2: 维度-知识点匹配混合（AI 标注映射关系）---
             dim_kp_map = result.get('dimension_kp_map', {})
 
             if kp_scores and rubric_items:
@@ -498,7 +480,6 @@ class AIScorer:
                     dim_name = item.get('criterion', '')
                     ai_score = float(scores_dict.get(dim_name, 70))
 
-                    # 用 AI 输出的维度-KP 映射查找相关 KP
                     related_kp_names = dim_kp_map.get(dim_name, [])
                     related = []
                     for kp_name in related_kp_names:
@@ -509,23 +490,18 @@ class AIScorer:
                     if related:
                         dim_kp_avg = sum(related) / len(related)
                     else:
-                        # 无匹配时回退到全局 KP 均分
                         all_vals = [float(v) for v in kp_scores.values()]
                         dim_kp_avg = sum(all_vals) / len(all_vals) if all_vals else 70
 
                     if dim_kp_avg > ai_score:
-                        # KP 高于 AI 评分 → 用更大权重拉高
                         KP_WEIGHT = 0.30
                     else:
-                        # KP 低于或等于 AI 评分 → 用较小权重拉低
                         KP_WEIGHT = 0.15
                     blended = ai_score * (1 - KP_WEIGHT) + dim_kp_avg * KP_WEIGHT
                     scores_dict[dim_name] = round(blended, 1)
 
-            # --- Step 3: Rubric 加权计算最终总分 ---
             dim_completion_rates = result.get('dimension_completion_rates', {})
 
-            # 辅助函数：完成率 → 天花板
             def get_dim_ceiling(rate):
                 if rate >= 80:
                     return 100
@@ -539,7 +515,6 @@ class AIScorer:
                     return 45
 
             if scores_dict and rubric_items:
-                # 逐维度封顶
                 for item in rubric_items:
                     dim_name = item.get('criterion', '')
                     dim_score = float(scores_dict.get(dim_name, 0))
@@ -547,7 +522,6 @@ class AIScorer:
                     dim_ceiling = get_dim_ceiling(int(dim_cr) if dim_cr else completion_rate)
                     scores_dict[dim_name] = round(min(dim_score, dim_ceiling), 1)
 
-                # 加权计算总分
                 weighted_sum = 0
                 for item in rubric_items:
                     dim_name = item.get('criterion', '')
@@ -577,24 +551,21 @@ class AIScorer:
 
     def get_rag_contexts(self, submission):
         """
-        精准上下文提取逻辑：实现作业级评价闭环。
+        Precise Context Extraction Logic: Closing the Loop for Job-Level Evaluation.
         """
         assignment = submission.assignment
 
-        # 直接获取老师为这个具体作业勾选的 Knowledge Points 关联记录
         assigned_kps = assignment.knowledge_points.all()
 
         l1, l2, allowed = "", "", []
         for kp in assigned_kps:
             allowed.append(kp.name)
             detail = f"· {kp.name}: {kp.description}\n"
-            # 根据模型中的 is_system 属性自动归类
             if kp.is_system:
                 l1 += detail
             else:
                 l2 += detail
 
-        # 任务特定逻辑点 (L3)
         task_points = "\n".join(
             [f"- {p}" for p in assignment.reference_logic]
         ) if assignment.reference_logic else "Standard functional implementation."
@@ -615,7 +586,6 @@ class AIScorer:
         :param kp_scores:
         :return:
         """
-        # 1. 按分数分级推荐（个性化数量）
         recommendations = []
         if isinstance(kp_scores, dict):
             for k, v in kp_scores.items():
@@ -624,19 +594,16 @@ class AIScorer:
                 except (ValueError, TypeError):
                     continue
                 if score < 60:
-                    recommendations.append((k, score, 3))  # 弱项：推荐 3 个
+                    recommendations.append((k, score, 3))
                 elif score < 80:
-                    recommendations.append((k, score, 1))  # 中等：推荐 1 个
+                    recommendations.append((k, score, 1))
 
-        # 没有需要推荐的
         if not recommendations:
             return []
 
-        # 按分数排序，最弱的在前，最多取 3 个
         recommendations.sort(key=lambda x: x[1])
         recommendations = recommendations[:3]
 
-        # 2. 获取 Bloom 层级
         BLOOM_ORDER = ['remember', 'understand', 'apply', 'analyze', 'evaluate', 'create']
         kp_bloom_map = {}
         try:
@@ -649,7 +616,6 @@ class AIScorer:
         except Exception:
             pass
 
-        # 3. 构造带 Bloom 层级的推荐 Prompt
         weak_details = []
         for name, score, count in recommendations:
             current_bloom = kp_bloom_map.get(name, 'apply')
@@ -708,11 +674,9 @@ class AIScorer:
             print(f"AI query generation failed: {str(e)}")
             return []
 
-        # 3. 调用 YouTube Data API 搜索视频
         import requests as req
         YOUTUBE_API_KEY = os.environ.get('YOUTUBE_API_KEY', '')
 
-        # 没有 API key 时降级为 YouTube 搜索页链接
         if not YOUTUBE_API_KEY:
             return [
                 {
