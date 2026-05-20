@@ -8,7 +8,7 @@ from .models import (
 )
 
 
-# --- 1. 内联组件 (Inlines) ---
+# --- 1. Inlines ---
 
 class DockerReportInline(admin.StackedInline):
     model = DockerReport
@@ -34,7 +34,7 @@ class AppealInline(admin.StackedInline):
     classes = ('collapse',)
 
 
-# --- 2. 管理配置 (ModelAdmins) ---
+# --- 2. Admin Configuration (ModelAdmins)---
 
 @admin.register(User)
 class UserAdmin(admin.ModelAdmin):
@@ -161,7 +161,7 @@ class AppealAdmin(admin.ModelAdmin):
         return obj.evaluation.submission.assignment.title
 
 
-# 教情诊断报告管理
+# Education diagnosis report management
 @admin.register(TeachingInsightReport)
 class TeachingInsightReportAdmin(admin.ModelAdmin):
     list_display = ('assignment', 'colored_status', 'get_avg_score', 'generated_at')
@@ -196,10 +196,10 @@ class TeachingInsightReportAdmin(admin.ModelAdmin):
     )
 
 
-# 全局配置管理
+# Global Configuration management
 @admin.register(SystemConfiguration)
 class SystemConfigurationAdmin(admin.ModelAdmin):
-    # 在列表页展示关键的 Docker 限制
+    # A list page showing key Docker limitations
     list_display = ('__str__', 'deepseek_model_name', 'docker_mem_limit', 'docker_cpu_quota', 'docker_timeout')
 
     fieldsets = (
