@@ -122,6 +122,51 @@ def register_teacher(request):
     except Exception as e:
         return Response({"error": f"System busy, please try again later: {str(e)}"}, status=500)
 
+@api_view(['POST'])
+@permission_classes([permissions.AllowAny])
+def request_password_reset(request):
+    """发送密码重置链接"""
+    from django.core.cache import cache
+    import uuid
+
+    email = request.data.get('email', '').strip()
+    user = User.objects.filter(email=email).first()
+    if not user:
+        return Response({"message": "If the email exists, a reset link has been sent."}, status=200)
+
+    token = uuid.uuid4().hex
+    cache.set(f'pwd_reset:{token}', user.id, timeout=86400)  # 24h
+
+    link = f"{settings.FRONTEND_URL}/reset-password?token={token}"
+    send_mail(
+        '[System] Password Reset',
+        f'Click the link to reset your password:\n\n{link}\n\nValid for 24 hours.',
+        settings.EMAIL_HOST_USER,
+        [email],
+        fail_silently=True
+    )
+    return Response({"message": "If the email exists, a reset link has been sent."}, status=200)
+
+
+@api_view(['POST'])
+@permission_classes([permissions.AllowAny])
+def confirm_password_reset(request):
+    """确认密码重置"""
+    from django.core.cache import cache
+
+    token = request.data.get('token', '')
+    new_password = request.data.get('password', '')
+
+    user_id = cache.get(f'pwd_reset:{token}')
+    if not user_id:
+        return Response({"error": "Invalid or expired token"}, status=400)
+
+    user = User.objects.get(id=user_id)
+    user.set_password(new_password)
+    user.save()
+    cache.delete(f'pwd_reset:{token}')
+    return Response({"message": "Password has been reset successfully."}, status=200)
+
 
 @api_view(['GET'])
 @permission_classes([permissions.AllowAny])
@@ -342,6 +387,43 @@ class MyTokenObtainPairView(TokenObtainPairView):
         serializer_class (Serializer): This points to a custom token grabber serializer.
     """
     serializer_class = MyTokenObtainPairSerializer
+
+    def post(self, request, *args, **kwargs):
+        from django.core.cache import cache
+        from rest_framework.response import Response
+        from rest_framework import status
+
+        ip = self._get_client_ip(request)
+        username = request.data.get('username', '')
+        cache_key = f'login_attempts:{username}:{ip}'
+
+        # 检查是否被锁定
+        attempts = cache.get(cache_key, 0)
+        if attempts >= 5:
+            ttl = cache.ttl(cache_key)
+            minutes = max(1, ttl // 60) if ttl > 0 else 60
+            return Response(
+                {
+                    'detail': f'Account temporarily locked due to too many failed attempts. Please try again in {minutes} minutes.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        try:
+            response = super().post(request, *args, **kwargs)
+            # 登录成功
+            cache.delete(cache_key)
+            return response
+        except Exception:
+            # 登录失败（DRF 会处理 401 响应，我们只负责计数）
+            cache.set(cache_key, attempts + 1, timeout=3600)
+            raise
+
+    @staticmethod
+    def _get_client_ip(request):
+        xff = request.META.get('HTTP_X_FORWARDED_FOR')
+        if xff:
+            return xff.split(',')[0].strip()
+        return request.META.get('REMOTE_ADDR', '0.0.0.0')
 
 
 class IsTeacher(permissions.BasePermission):
@@ -639,6 +721,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         submission_id = request.data.get('submission_id')
         new_score = request.data.get('score')
         new_feedback = request.data.get('feedback')
+        kp_scores = request.data.get('kp_scores', {})
         try:
             evaluation = AIEvaluation.objects.get(submission_id=submission_id)
             old_score = evaluation.total_score
@@ -646,6 +729,14 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
             evaluation.feedback = new_feedback
             evaluation.teacher_reviewed = True
             evaluation.is_published = True
+            if kp_scores:
+                raw = evaluation.ai_raw_feedback or '{}'
+                try:
+                    raw_dict = json.loads(raw) if isinstance(raw, str) else raw
+                except Exception:
+                    raw_dict = {}
+                raw_dict['scores'] = kp_scores
+                evaluation.ai_raw_feedback = json.dumps(raw_dict, ensure_ascii=False)
             evaluation.save()
             sub = evaluation.submission
             sub.final_score = new_score
@@ -759,8 +850,9 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
             "3. Descriptions should be actionable: explain what a student's code should demonstrate",
             "4. Each knowledge point should map to a specific rubric dimension when possible",
             "5. Return exactly 3-5 knowledge points, not more",
+            "6. For each knowledge point, assign a Bloom's taxonomy level: remember, understand, apply, analyze, evaluate, or create. Base it on the cognitive demand of the requirement.",
             "",
-            'Return a JSON object: {"suggested_kps": [{"name": "...", "description": "..."}]}',
+            'Return a JSON object: {"suggested_kps": [{"name": "...", "description": "...", "bloom_level": "..."}]}',
         ]
         prompt = "\n".join(prompt_lines)
 
@@ -809,19 +901,25 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
                     continue
 
                 # 创建新 KP
+                bloom = kp_data.get('bloom_level', 'apply').lower().strip()
+                if bloom not in ['remember', 'understand', 'apply', 'analyze', 'evaluate', 'create']:
+                    bloom = 'apply'
+
                 kp = KnowledgePoint.objects.create(
                     name=kp_name,
                     description=kp_desc,
                     category='L2',
                     is_system=False,
                     course=course_obj,
-                    language=language.lower()
+                    language=language.lower(),
+                    bloom_level=bloom
                 )
                 existing_kp_names.add(name_lower)
                 final_suggestions.append({
                     "id": kp.id,
                     "name": kp.name,
                     "description": kp.description,
+                    "bloom_level": bloom,
                     "is_new": True
                 })
 
@@ -1157,6 +1255,8 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
         # 2. Parse individual scores from ai_raw_feedback
         rubric_items = assignment.rubric_config.get('items', [])
+        if not rubric_items:
+            return Response({"error": "This assignment is not configured with Rubric and cannot generate a PDF report"}, status=400)
 
         # Parse the ai_raw_feedback text field
         student_scores_data = {}
@@ -1570,9 +1670,9 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         if appeal.evaluation.submission.assignment.teacher != request.user:
             return Response({"error": "You do not have permission to resolve this appeal"}, status=403)
 
-        if appeal.status != 'pending_teacher':
+        if appeal.status == 'completed':
             return Response(
-                {"error": f"This appeal is in '{appeal.get_status_display()}' status and cannot be processed"},
+                {"error": "This appeal has already been resolved."},
                 status=400)
 
         # 2. Getting parameters
@@ -1644,6 +1744,9 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
 
         assignment = self.get_object()
 
+        # Support forced regenerate via ?regenerate=true
+        if request.query_params.get('regenerate') == 'true':
+            TeachingInsightReport.objects.filter(assignment=assignment).delete()
         # 1. 检查是否已有缓存报告
         try:
             report = TeachingInsightReport.objects.get(assignment=assignment)
@@ -2048,7 +2151,7 @@ class TeacherStudentManagementViewSet(viewsets.ViewSet):
     This view set is not directly associated with a single model, but operates as a functional control center.
     Permission restrictions: Access is restricted to authenticated users with the 'teacher' role only.
     """
-    permission_classes = [IsTeacher]
+    permission_classes = [IsAuthenticated]
 
     @action(detail=False, methods=['post'], url_path='import-students')
     def import_students(self, request):
@@ -2059,6 +2162,8 @@ class TeacherStudentManagementViewSet(viewsets.ViewSet):
                         -data ['course_id'] (int, optional): Target course ID.
         :return: Response: Success message containing creation and enrollment statistics
         """
+        if request.user.role not in ['teacher', 'admin']:
+            return Response({"error": "Permission denied"}, status=403)
         file = request.FILES.get('file')
         course_id = request.data.get('course_id')
 
@@ -2287,61 +2392,14 @@ class StudentAssignmentViewSet(viewsets.ReadOnlyModelViewSet):
         if not appeal_placeholder:
             return Response({"error": "You have submitted a complaint for this job, please do not repeat the operation"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # 4. Perform a time-consuming AI audit service
-        from .utils.appeal_service import AppealService
-        try:
-            review_result = AppealService.process_student_appeal(submission, student_reason)
+        # 4. Dispatch AI audit asynchronously (Celery)
+        from .tasks import async_appeal_audit
+        async_appeal_audit.delay(appeal_placeholder.id)
 
-            # 5. Backfill AI audit results and flow state
-            is_reasonable = review_result.get('is_reasonable', False)
-
-            appeal_placeholder.ai_judgment = review_result.get('ai_judgment', "AI has completed the audit")
-            appeal_placeholder.status = 'pending_teacher' if is_reasonable else 'rejected_by_ai'
-            appeal_placeholder.save()
-
-            try:
-                from .models import SystemOperationLog
-
-                # 记录详情：包括申诉是否被 AI 认为合理
-                ai_res = "Reasonable" if is_reasonable else "Unreasonable"
-                log_detail = f"Student submitted an appeal for '{assignment.title}'. AI Pre-audit: {ai_res}."
-
-                SystemOperationLog.objects.create(
-                    user=request.user,  # 这里的 user 是学生
-                    action="SUBMIT_APPEAL",
-                    target_type="Appeal",
-                    target_id=str(appeal_placeholder.id),
-                    detail=log_detail
-                )
-            except Exception as log_e:
-                print(f"Logging failure: {log_e}")
-
-            return Response({
-                "status": "success",
-                "is_reasonable": is_reasonable,
-                "message": review_result.get('reply_for_student', "The complaint has been dealt with.")
-            }, status=status.HTTP_201_CREATED)
-
-        except Exception as e:
-            appeal_placeholder.ai_judgment = f"AI audit service exception: {str(e)}"
-            appeal_placeholder.status = 'pending_teacher'
-            appeal_placeholder.save()
-            from .models import SystemOperationLog
-            try:
-                SystemOperationLog.objects.create(
-                    user=request.user,
-                    action="APPEAL_AI_ERROR",
-                    target_type="Appeal",
-                    target_id=str(appeal_placeholder.id),
-                    detail=f"AI Pre-audit service failed. Error: {str(e)[:100]}. Automatically assigned to teacher."
-                )
-            except Exception:
-                pass
-
-            return Response({
-                "error": "The AI pre-review has expired, and the system has automatically transferred it to the teacher for manual review",
-                "is_reasonable": True
-            }, status=status.HTTP_200_OK)
+        return Response({
+            "status": "pending",
+            "message": "Your appeal has been submitted and will be reviewed shortly."
+        }, status=status.HTTP_201_CREATED)
 
 
 class StudentCourseViewSet(viewsets.ReadOnlyModelViewSet):
@@ -2419,7 +2477,11 @@ class StudentSubmissionViewSet(viewsets.ModelViewSet):
         Get the submission history of the current student.
         :return: Sorting by creation time in reverse order ensures that students see the most recent submission record first.
         """
-        return Submission.objects.filter(student=self.request.user).order_by('-created_at')
+        return Submission.objects.filter(
+            student=self.request.user
+        ).select_related(
+            'assignment', 'ai_evaluation', 'group'
+        ).order_by('-created_at')
 
     def create(self, request, *args, **kwargs):
         """

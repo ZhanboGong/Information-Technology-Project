@@ -198,3 +198,67 @@ class StaticAnalyzer:
                 'function_count': total_methods
             }
         }
+
+    @staticmethod
+    def check_interface_compliance(project_path):
+        """检查 Java 项目的接口实现完整性"""
+        import re, os
+
+        java_files = {}
+        for root, _, files in os.walk(project_path):
+            for f in files:
+                if f.endswith('.java'):
+                    with open(os.path.join(root, f), 'r', encoding='utf-8', errors='ignore') as fh:
+                        java_files[f] = fh.read()
+
+        interfaces = {}
+        for fname, content in java_files.items():
+            match = re.search(r'public\s+interface\s+(\w+)', content)
+            if match:
+                # 只提取接口中声明的方法（排除构造器和注释）
+                method_lines = [l.strip() for l in content.split('\n')
+                                if l.strip() and not l.strip().startswith('//')
+                                and not l.strip().startswith('*')
+                                and '(' in l and ';' in l]
+                methods = []
+                for line in method_lines:
+                    m = re.search(r'\w+\s+(\w+)\s*\(', line)
+                    if m:
+                        methods.append(m.group(1))
+                interfaces[match.group(1)] = methods
+
+        issues = []
+        for iface_name, required_methods in interfaces.items():
+            implementors = []
+            for fname, content in java_files.items():
+                # 跳过接口定义文件本身
+                if f'interface {iface_name}' in content:
+                    continue
+
+                if re.search(r'implements\s+' + iface_name, content):
+                    implementors.append(fname)
+                    # implements 了，检查方法是否完整
+                    for method in required_methods:
+                        if method + '(' not in content:
+                            issues.append(
+                                f"Class {fname.replace('.java', '')} implements {iface_name} "
+                                f"but is missing method: {iface_name}.{method}()"
+                            )
+                else:
+                    # 没有 implements，检查是否被其他类引用（说明它应该实现）
+                    for other_fname, other_content in java_files.items():
+                        if fname != other_fname and fname.replace('.java', '') in other_content:
+                            # 这个类被其他文件使用，说明它存在但没 implements
+                            pass
+
+            if not implementors:
+                issues.append(
+                    f"No class implements interface {iface_name} "
+                    f"(required methods: {', '.join(required_methods)})"
+                )
+
+        return {
+            'has_interfaces': len(interfaces) > 0,
+            'issues': issues,
+            'summary': f"Found {len(interfaces)} interface(s), {len(issues)} compliance issue(s)"
+        }

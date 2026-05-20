@@ -49,7 +49,7 @@ class KnowledgePointSerializer(serializers.ModelSerializer):
     """
     class Meta:
         model = KnowledgePoint
-        fields = ['id', 'name', 'category', 'is_system', 'language', 'description', 'course']
+        fields = ['id', 'name', 'category', 'is_system', 'language', 'bloom_level', 'description', 'course']
 
 
 # --- 4. The course serializer ---
@@ -342,29 +342,23 @@ class SubmissionSerializer(serializers.ModelSerializer):
             return 0
 
     def get_has_appeal(self, obj):
-        """
-        🚀 逻辑升级：
-        只要该学生对该作业的【任何一次】提交发起了申诉，该字段都返回 True。
-        """
+        view = self.context.get('view')
+        if not view or getattr(view, 'action', None) != 'retrieve':
+            return False
         return Appeal.objects.filter(
             evaluation__submission__assignment=obj.assignment,
             evaluation__submission__student=obj.student
         ).exists()
 
     def get_active_appeal_data(self, obj):
-        """
-        🚀 逻辑同步：
-        获取该作业下唯一的申诉记录。
-        这样即使是在没有发起申诉的 Submission 页面，前端也能拿到申诉进度。
-        """
-        # 找到该作业关联的最新申诉记录
+        view = self.context.get('view')
+        if not view or getattr(view, 'action', None) != 'retrieve':
+            return None
         appeal = Appeal.objects.filter(
             evaluation__submission__assignment=obj.assignment,
             evaluation__submission__student=obj.student
         ).first()
-
         if appeal:
-            # 动态调用我们之前定义的 AppealSerializer
             return AppealSerializer(appeal).data
         return None
 

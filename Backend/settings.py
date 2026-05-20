@@ -48,7 +48,7 @@ INSTALLED_APPS = [
     "apps.analytics",
     "rest_framework",
     "corsheaders",
-    "rest_framework_simplejwt"
+    "rest_framework_simplejwt",
 ]
 
 # Configure REST_FRAMEWORK
@@ -219,3 +219,6 @@ CELERY_BEAT_SCHEDULE = {
     },
 }
 
+# 登录限流（Redis 缓存，无需迁移）
+AXES_FAILURE_LIMIT = 5           # 5 次失败后锁定
+AXES_COOLOFF_MINUTES = 60        # 锁定 60 分钟

@@ -273,10 +273,18 @@ def async_generate_teaching_insights(self, assignment_id):
 
             # 收集反馈片段用于 AI 上下文
             if evaluation.feedback:
-                common_issues.append(evaluation.feedback[:80])
+                common_issues.append(evaluation.feedback[:300])
 
         # 格式化知识点汇总
-        kp_summary_text = [f"- {name}: 平均 {round(sum(v) / len(v), 1)}分" for name, v in kp_stats.items()]
+        kp_summary_text = []
+        for name, v in kp_stats.items():
+            avg_v = round(sum(v) / len(v), 1)
+            min_v = round(min(v), 1)
+            max_v = round(max(v), 1)
+            weak_n = sum(1 for s in v if s < 60)
+            kp_summary_text.append(
+                f"- {name}: avg={avg_v}, min={min_v}, max={max_v}, weak_students={weak_n}/{len(v)}"
+            )
         class_avg = round(total_score_sum / len(best_submissions), 1)
 
         # --- 3. 🤖 调用 AI (灵魂 Prompt) ---
@@ -295,13 +303,14 @@ def async_generate_teaching_insights(self, assignment_id):
 
         [Task]
         Based on the data, identify collective weaknesses and provide actionable teaching advice.
+        For each weakness found, reference the specific knowledge point name and the number of students affected.
 
         [Output Requirement]
         Return ONLY a JSON object with:
-        - "analysis": A brief summary of class performance.
-        - "strengths": A list of 2 key areas where the class excelled.
-        - "weaknesses": A list of 2 key areas needing improvement.
-        - "suggestions": A list of 3 specific teaching adjustments for the next lecture.
+        - "analysis": A brief summary of class performance (2-3 sentences, in English).
+        - "strengths": A list of 2 key areas where the class excelled, citing specific KP names.
+        - "weaknesses": A list of 2 key areas needing improvement, citing specific KP names and weak student counts.
+        - "suggestions": A list of 3 specific, actionable teaching adjustments for the next lecture (in English).
         """
 
         print("🤖 [TASK] Calling AI Scorer...")
@@ -322,10 +331,10 @@ def async_generate_teaching_insights(self, assignment_id):
             print(f"❌ [TASK] JSON Parse Error: {str(json_err)}")
             # 即使解析失败，也手动构造一个结构，防止状态卡在 pending
             insights = {
-                "analysis": "AI 返回格式异常，请查看原始数据",
-                "strengths": ["数据解析失败"],
-                "weaknesses": ["数据解析失败"],
-                "suggestions": ["请尝试重新点击分析按钮"],
+                "analysis": "AI response format error — please review raw data below.",
+                "strengths": ["Data parsing failed"],
+                "weaknesses": ["Data parsing failed"],
+                "suggestions": ["Please click 'Analyze' again to retry."],
                 "raw_data": raw_res[:200]  # 记录前200个字备查
             }
 
@@ -371,7 +380,8 @@ def _aggregate_by_student(raw_matches):
         student_pairs[key]['files'].append({
             'file_a': m.get('file_a', ''),
             'file_b': m.get('file_b', ''),
-            'similarity': sim
+            'similarity': sim,
+            'detail_urls': m.get('detail_urls', {})
         })
 
     # 2. 计算每个学生对的平均相似度
@@ -495,3 +505,15 @@ def async_plagiarism_check(self, report_id, assignment_id):
         report.error_message = str(e)
         report.save()
         raise self.retry(exc=e, countdown=60)
+
+
+@shared_task
+def async_appeal_audit(appeal_id):
+    from .models import Appeal
+    from .utils.appeal_service import AppealService
+    appeal = Appeal.objects.get(id=appeal_id)
+    sub = appeal.evaluation.submission
+    result = AppealService.process_student_appeal(sub, appeal.student_reason)
+    appeal.ai_judgment = result.get('ai_judgment', 'AI audit completed.')
+    appeal.status = 'pending_teacher' if result.get('is_reasonable', False) else 'rejected_by_ai'
+    appeal.save()

@@ -276,5 +276,161 @@ class AnalyticsViewSet(viewsets.ViewSet):
             "study_tip": study_tip
         })
 
+    @action(detail=False, methods=['get'], url_path='knowledge-heatmap')
+    def knowledge_heatmap(self, request):
+        """
+        知识点掌握度热力图：作业维度 × 知识点维度的二维矩阵。
+        每个作业只取最高分的那条评估记录。
+        """
+        user = request.user
+        evals = AIEvaluation.objects.filter(
+            submission__student=user,
+            is_published=True
+        ).select_related('submission__assignment').order_by('created_at')
+
+        if not evals.exists():
+            return Response({"assignments": [], "knowledge_points": [], "matrix": []})
+
+        assignments = []
+        all_kps = set()
+        matrix = []
+
+        # 按作业分组，每个作业只取最高分的那条
+        seen_assignments = {}
+        for ev in evals:
+            asm_id = ev.submission.assignment.id
+            if asm_id not in seen_assignments or ev.total_score > seen_assignments[asm_id].total_score:
+                seen_assignments[asm_id] = ev
+
+        for asm_id, ev in seen_assignments.items():
+            assignment_title = ev.submission.assignment.title
+            kp_data = self._extract_kp_scores(ev)
+            if not kp_data and isinstance(ev.scores, dict):
+                kp_data = ev.scores.get('kp_scores', {})
+
+            row = {"assignment": assignment_title, "scores": {}}
+            for kp_name, score in kp_data.items():
+                all_kps.add(kp_name)
+                row["scores"][kp_name] = round(float(score), 1)
+            matrix.append(row)
+
+            if assignment_title not in assignments:
+                assignments.append(assignment_title)
+
+        return Response({
+            "assignments": assignments,
+            "knowledge_points": sorted(list(all_kps)),
+            "matrix": matrix
+        })
+
+    @action(detail=False, methods=['get'], url_path='course-ranking')
+    def course_ranking(self, request):
+        """
+        学生在每门课程中的排名。
+        算法：每个作业取该学生的最高分，然后算课程均值，按均值排名。
+        """
+        from apps.core.models import Course, Submission
+        from django.db.models import Max
+
+        user = request.user
+        courses = Course.objects.filter(students=user)
+
+        rankings = []
+        for course in courses:
+            # 获取该课程下所有作业
+            assignments = course.assignments.all()
+            if not assignments.exists():
+                continue
+
+            # 获取该课程下所有学生的每个作业最高分
+            student_best = Submission.objects.filter(
+                assignment__course=course,
+                status='completed'
+            ).values('student', 'assignment').annotate(
+                best=Max('final_score')
+            )
+
+            # 按学生分组，计算课程均值
+            from collections import defaultdict
+            student_scores = defaultdict(list)
+            for item in student_best:
+                student_scores[item['student']].append(float(item['best'] or 0))
+
+            # 计算每个学生的课程均值
+            student_avgs = []
+            for sid, scores in student_scores.items():
+                avg = sum(scores) / len(scores) if scores else 0
+                student_avgs.append({"student_id": sid, "avg": round(avg, 1), "assignment_count": len(scores)})
+
+            # 按均值降序排列
+            student_avgs.sort(key=lambda x: x['avg'], reverse=True)
+
+            # 找到当前学生的排名
+            rank = 0
+            my_avg = 0
+            my_assignments = 0
+            total_students = len(student_avgs)
+            for idx, item in enumerate(student_avgs, 1):
+                if item['student_id'] == user.id:
+                    rank = idx
+                    my_avg = item['avg']
+                    my_assignments = item['assignment_count']
+                    break
+
+            if rank == 0:
+                continue  # 该学生没有提交记录
+
+            percentile = round((1 - rank / total_students) * 100, 1) if total_students > 0 else 0
+
+            rankings.append({
+                "course_id": course.id,
+                "course_name": course.name,
+                "rank": rank,
+                "total_students": total_students,
+                "my_avg_score": my_avg,
+                "assignments_completed": my_assignments,
+                "total_assignments": assignments.count(),
+                "percentile": percentile
+            })
+
+        return Response({"rankings": rankings})
+
+    @action(detail=False, methods=['get'], url_path='kp-growth-trend')
+    def kp_growth_trend(self, request):
+        """
+        每个知识点的分数变化趋势（按作业时间排序）。
+        前端可用于绘制多折线图。
+        """
+        user = request.user
+        evals = AIEvaluation.objects.filter(
+            submission__student=user,
+            is_published=True
+        ).select_related('submission__assignment').order_by('created_at')
+
+        if not evals.exists():
+            return Response({"labels": [], "series": {}})
+
+        labels = []  # x 轴：作业名
+        series = {}  # 每个知识点一条线
+
+        for ev in evals:
+            title = ev.submission.assignment.title
+            kp_data = self._extract_kp_scores(ev)
+            if not kp_data and isinstance(ev.scores, dict):
+                kp_data = ev.scores.get('kp_scores', {})
+
+            if title not in labels:
+                labels.append(title)
+
+            for kp_name, score in kp_data.items():
+                if kp_name not in series:
+                    series[kp_name] = []
+                series[kp_name].append(round(float(score), 1))
+
+        return Response({
+            "labels": labels,
+            "series": series
+        })
+
 
 

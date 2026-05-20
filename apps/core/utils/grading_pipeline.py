@@ -102,6 +102,8 @@ class GradingPipeline:
                 for root, dirs, files in os.walk(work_dir):
                     dirs[:] = [d for d in dirs if not d.startswith('.')]
                     for f in files:
+                        if f.startswith('.') or f.startswith('._'):
+                            continue
                         if f.lower().endswith(valid_extensions):
                             target_file = os.path.join(root, f)
                             print(f"Auto-detected source file: {target_file}")
@@ -170,7 +172,17 @@ class GradingPipeline:
         with transaction.atomic():
             # 1. Call AI to get structured review data
             eval_data = self.scorer.evaluate_code(self.submission, docker_report, project_path=work_dir, static_report=static_report)
-
+            from apps.core.utils.grading_review_agent import GradingReviewAgent
+            agent = GradingReviewAgent()
+            passed, issues, suggestion = agent.review(eval_data)
+            if not passed:
+                print(f"[Agent] Issues flagged: {issues}")
+                eval_data = self.scorer.evaluate_code(
+                    self.submission, docker_report,
+                    project_path=work_dir, static_report=static_report,
+                    review_context={'issues': issues, 'suggestion': suggestion}
+                )
+                print(f"[Agent] Re-scored to {eval_data.get('total_score')}")
             # Fractional precision conversion
             try:
                 raw_val = eval_data.get('total_score', 0)

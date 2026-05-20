@@ -40,6 +40,9 @@ class ProjectAnalyzer:
             for root, dirs, files in os.walk(extract_path):
                 dirs[:] = [d for d in dirs if d not in skip_dirs]
                 for f in files:
+                    if f.startswith('.') or f.startswith('._'):
+                        os.remove(os.path.join(root, f))
+                        continue
                     if any(f.endswith(ext) for ext in skip_exts):
                         os.remove(os.path.join(root, f))
 

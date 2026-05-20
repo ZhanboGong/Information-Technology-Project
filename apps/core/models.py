@@ -148,6 +148,21 @@ class KnowledgePoint(models.Model):
     category = models.CharField(max_length=50, null=True, verbose_name="分类(L1/L2)")
     is_system = models.BooleanField(default=False, verbose_name="是否为系统级(L1)")
     language = models.CharField(max_length=50, null=True, blank=True, verbose_name="编程语言")
+    BLOOM_CHOICES = (
+        ('remember', '记忆'),
+        ('understand', '理解'),
+        ('apply', '应用'),
+        ('analyze', '分析'),
+        ('evaluate', '评价'),
+        ('create', '创造'),
+    )
+
+    bloom_level = models.CharField(
+        max_length=20,
+        choices=BLOOM_CHOICES,
+        default='apply',
+        verbose_name="布鲁姆认知层级"
+    )
     course = models.ForeignKey(Course, on_delete=models.CASCADE, null=True, blank=True, verbose_name="所属课程")
 
     class Meta:
@@ -459,10 +474,10 @@ class Appeal(models.Model):
     4. Data Integrity: Uses a One-to-One link to ensure each evaluation has only one active dispute.
     """
     STATUS_CHOICES = (
-        ('pending_ai', 'AI 审核中'),
-        ('rejected_by_ai', 'AI 驳回'),
-        ('pending_teacher', '待教师复核'),
-        ('completed', '处理完成')
+        ('pending_ai', 'AI Auditing'),
+        ('rejected_by_ai', 'AI Rejected'),
+        ('pending_teacher', 'Pending Review'),
+        ('completed', 'Resolved')
     )
     # Associated score record
     evaluation = models.OneToOneField('AIEvaluation', on_delete=models.CASCADE, related_name='appeal')

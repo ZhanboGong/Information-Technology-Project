@@ -107,7 +107,8 @@ class AppealService:
                     {"role": "system", "content": """You are a fair and experienced Computer Science professor serving as an academic integrity auditor.
                     Your role is to objectively review grade appeals submitted by students.
                     You must base your judgment solely on evidence found in the student's code and the assignment requirements.
-                    Be empathetic but firm — acknowledge the student's effort while maintaining grading fairness."""},
+                    Be empathetic but firm — acknowledge the student's effort while maintaining grading fairness.
+                    IMPORTANT: All output MUST be in English, regardless of the language used in the student's appeal."""},
                     {"role": "user", "content": prompt}
                 ],
                 response_format={'type': 'json_object'},

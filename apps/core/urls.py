@@ -19,7 +19,8 @@ from .views import (
     AdminUserManagementViewSet,
     SystemMonitorView,
     AdminSystemLogView, NotificationConfigViewSet, DockerManagementViewSet,
-    register_teacher, verify_email, AdminAIUsageStatsView, AdminSystemHealthView, AdminKnowledgePointViewSet
+    register_teacher, verify_email, AdminAIUsageStatsView, AdminSystemHealthView, AdminKnowledgePointViewSet,
+    request_password_reset, confirm_password_reset
 )
 from rest_framework_simplejwt.views import TokenRefreshView
 
@@ -86,4 +87,8 @@ urlpatterns = [
     path('register-teacher/', register_teacher),
 
     path('verify-email/', verify_email),
+
+    path('password-reset/', request_password_reset),
+
+    path('password-reset/confirm/', confirm_password_reset),
 ]

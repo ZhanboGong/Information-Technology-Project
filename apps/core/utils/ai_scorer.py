@@ -158,7 +158,9 @@ class AIScorer:
 
         # 3. 构造沙箱事实证据
         if not docker_report.compile_status:
-            sandbox_evidence = f"🚨 Compilation Failed: The code did not compile successfully.\nError Stack Trace:\n{docker_report.stderr}"
+            sandbox_evidence = f"🚨 Compilation Failed: The code did not compile successfully.\nError:\n{docker_report.stdout}"
+        elif docker_report.exit_code != 0:
+            sandbox_evidence = f"⚠️ Execution Failed (exit code {docker_report.exit_code}): The code compiled but did not run successfully.\nNote: '{docker_report.stdout}' — for library/framework projects without a main method, this is expected and should NOT affect scoring. Evaluate the source code structure, design, and rubric compliance directly."
         else:
             sandbox_evidence = f"✅ Execution Successful:\nSTDOUT: {docker_report.stdout or 'Empty'}\nSTDERR: {docker_report.stderr or 'None'}"
 
@@ -251,6 +253,7 @@ class AIScorer:
                 demonstrates competence beyond the bare minimum — at least C-level. 
                 If the work only scrapes by at P-level, mark ❌.
                 Source B implemented count = count of ✅
+                From your Source B analysis, also produce a per-dimension completion rate (0-100): for each rubric dimension, estimate how fully the student has completed that specific dimension's requirements.
 
                 **Combined Completion Rate:**
                 = (Source A implemented count + Source B implemented count)
@@ -288,6 +291,8 @@ class AIScorer:
                 {{
                     "completion_rate": integer (0-100, from Step 0 analysis),
                     "scores": {{ ... }},
+                    "dimension_kp_map": {{ ... mapping from rubric dimension to related KP names ... }},
+                    "dimension_completion_rates": {{ ... mapping from rubric dimension to completion rate 0-100 ... }},
                     "stats_scores": {{ ... }},
                     "kp_scores": {{ ... }},
                     "total_score": value (one decimal, e.g. 85.9),
@@ -317,6 +322,20 @@ class AIScorer:
                         "File I/O and Exception Handling": 76.0,
                         "Data Encapsulation and Validation": 85.5
                     }},
+                    "dimension_kp_map": {{
+                        "Object-Oriented Programming (Parts 1-2)": ["Interface Implementation", "Class Inheritance and Polymorphism"],
+                        "Collections Management (Parts 3-5)": ["Collections Framework (LinkedList, Comparator)"],
+                        "I/O Mechanism (Parts 6-7)": ["File I/O and Exception Handling"],
+                        "Accuracy & Efficiency": ["Data Encapsulation and Validation"],
+                        "Concept Understanding": ["Interface Implementation", "Class Inheritance and Polymorphism", "Collections Framework (LinkedList, Comparator)", "File I/O and Exception Handling", "Data Encapsulation and Validation"]
+                    }},
+                    "dimension_completion_rates": {{
+                        "Object-Oriented Programming (Parts 1-2)": 85,
+                        "Collections Management (Parts 3-5)": 75,
+                        "I/O Mechanism (Parts 6-7)": 90,
+                        "Accuracy & Efficiency": 80,
+                        "Concept Understanding": 80
+                    }},
                     "total_score": 85.5,
                     "feedback": "## Executive Summary\\nThis submission demonstrates solid OOP understanding...\\n\\n## Execution Analysis\\nThe program executed successfully...\\n\\n## Logic & Design Deep-Dive\\n**Interface Implementation**: The Ride class fully implements RideInterface... (Score: 90)\\n**Class Inheritance and Polymorphism**: Excellent use of abstract class Person... (Score: 90)\\n\\n## Refactoring Suggestions\\n### 1. Fix checkVisitorFromHistory...\\n**Before:** ...\\n**After:** ...\\n\\n## Best Practices\\nConsider using dependency injection for file paths..."
                 }}
@@ -328,6 +347,8 @@ class AIScorer:
                 - total_score MUST be a number with one decimal place (e.g. 85.9, not 86)
                 - total_score MUST be calculated from the weighted average of scores dimensions, NOT copied from any example
                 - completion_rate MUST be an integer (0-100) reflecting actual requirement completion from Step 0
+                - dimension_kp_map: for EACH rubric dimension in scores, list the KP names (from kp_scores) that are semantically related to that dimension. Every dimension MUST have at least one KP mapped.
+                - dimension_completion_rates: for EACH rubric dimension, output a 0-100 integer reflecting how much of that specific dimension's requirements are fulfilled. Use your Source B per-dimension evaluation as the basis.
                 - All feedback MUST be in English
                 """
         if review_context:
@@ -365,6 +386,10 @@ class AIScorer:
                        - Clearly meets P criteria → 50-64
                        - Does not meet P criteria → below 50
                     4. If the student's work is between two levels, score at the higher level's lower bound.
+                    5. CALIBRATION — use the FULL range of each band:
+                       - HD work that clearly satisfies the rubric → score 90-100, not 85-90.
+                       - D work that clearly satisfies the rubric → score 80-84, not 75-78.
+                       - Minor imperfections in otherwise excellent work should only reduce scores by 1-3 points per issue. Do not let perfectionism drive HD work into the 80s.
                     
                     CORE PRINCIPLES:
                     1. YOUR SCORE MUST TRACE TO THE RUBRIC: Every number you give must match a specific rubric level. If you cannot justify it from the rubric, you scored wrong.
@@ -411,10 +436,10 @@ class AIScorer:
                     adjusted = round(completion_rate * penalty)
                     completion_rate = min(completion_rate, adjusted)
 
-            if completion_rate >= 85:
+            if completion_rate >= 80:
                 score_ceiling = 100
             elif completion_rate >= 70:
-                score_ceiling = 85
+                score_ceiling = 95
             elif completion_rate >= 55:
                 score_ceiling = 75
             elif completion_rate >= 35:
@@ -465,30 +490,64 @@ class AIScorer:
                 completion_rate = min(completion_rate, 54)
                 score_ceiling = min(score_ceiling, 60)
 
+            # --- Step 2: 维度-知识点匹配混合（AI 标注映射关系）---
+            dim_kp_map = result.get('dimension_kp_map', {})
 
-
-            # --- Step 2: KP 分数影响 Rubric 维度分数 ---
             if kp_scores and rubric_items:
-                kp_values = [float(v) for v in kp_scores.values() if v is not None]
-                kp_avg = sum(kp_values) / len(kp_values) if kp_values else 70
-
                 for item in rubric_items:
                     dim_name = item.get('criterion', '')
                     ai_score = float(scores_dict.get(dim_name, 70))
-                    # 混合：70% AI 判断 + 30% KP 客观证据
-                    KP_WEIGHT = 0.20
-                    blended = ai_score * (1 - KP_WEIGHT) + kp_avg * KP_WEIGHT
+
+                    # 用 AI 输出的维度-KP 映射查找相关 KP
+                    related_kp_names = dim_kp_map.get(dim_name, [])
+                    related = []
+                    for kp_name in related_kp_names:
+                        val = kp_scores.get(kp_name)
+                        if val is not None:
+                            related.append(float(val))
+
+                    if related:
+                        dim_kp_avg = sum(related) / len(related)
+                    else:
+                        # 无匹配时回退到全局 KP 均分
+                        all_vals = [float(v) for v in kp_scores.values()]
+                        dim_kp_avg = sum(all_vals) / len(all_vals) if all_vals else 70
+
+                    if dim_kp_avg > ai_score:
+                        # KP 高于 AI 评分 → 用更大权重拉高
+                        KP_WEIGHT = 0.30
+                    else:
+                        # KP 低于或等于 AI 评分 → 用较小权重拉低
+                        KP_WEIGHT = 0.15
+                    blended = ai_score * (1 - KP_WEIGHT) + dim_kp_avg * KP_WEIGHT
                     scores_dict[dim_name] = round(blended, 1)
 
             # --- Step 3: Rubric 加权计算最终总分 ---
+            dim_completion_rates = result.get('dimension_completion_rates', {})
+
+            # 辅助函数：完成率 → 天花板
+            def get_dim_ceiling(rate):
+                if rate >= 80:
+                    return 100
+                elif rate >= 70:
+                    return 95
+                elif rate >= 55:
+                    return 75
+                elif rate >= 35:
+                    return 60
+                else:
+                    return 45
+
             if scores_dict and rubric_items:
-                # 先封顶每个维度
+                # 逐维度封顶
                 for item in rubric_items:
                     dim_name = item.get('criterion', '')
                     dim_score = float(scores_dict.get(dim_name, 0))
-                    scores_dict[dim_name] = round(min(dim_score, score_ceiling), 1)
+                    dim_cr = dim_completion_rates.get(dim_name, completion_rate)
+                    dim_ceiling = get_dim_ceiling(int(dim_cr) if dim_cr else completion_rate)
+                    scores_dict[dim_name] = round(min(dim_score, dim_ceiling), 1)
 
-                # 再加权计算总分
+                # 加权计算总分
                 weighted_sum = 0
                 for item in rubric_items:
                     dim_name = item.get('criterion', '')
