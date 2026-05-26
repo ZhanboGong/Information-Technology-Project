@@ -115,6 +115,8 @@ class AssignmentSerializer(serializers.ModelSerializer):
 
     has_report = serializers.SerializerMethodField()
     submission_count = serializers.SerializerMethodField()
+    total_students = serializers.SerializerMethodField()
+
 
     class Meta:
         model = Assignment
@@ -137,6 +139,7 @@ class AssignmentSerializer(serializers.ModelSerializer):
             'is_group',
             'max_group_size',
             'submission_count',
+            'total_students',
             'created_at',
             'updated_at',
             'has_report'
@@ -175,6 +178,9 @@ class AssignmentSerializer(serializers.ModelSerializer):
         """
         from .models import Submission
         return Submission.objects.filter(assignment=obj, status='completed').values('student').distinct().count()
+
+    def get_total_students(self, obj):
+        return obj.course.students.count()
 
 
 class TeachingInsightReportSerializer(serializers.ModelSerializer):
@@ -377,6 +383,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'student_id_num',
             'is_active',
             'class_name',
+            'enable_deadline_reminder',
             'date_joined',
             'approval_status',
             'rejected_reason',

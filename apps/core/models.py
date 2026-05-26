@@ -39,7 +39,7 @@ class User(AbstractUser):
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='student', verbose_name="角色")
     student_id_num = models.CharField(max_length=50, null=True, blank=True, verbose_name="学号/工号")
     class_name = models.CharField(max_length=30, db_column='class', null=True, blank=True, verbose_name="班级")
-
+    enable_deadline_reminder = models.BooleanField(default=False, verbose_name="开启截止提醒邮件")
     approval_status = models.CharField(
         max_length=20,
         choices=APPROVAL_CHOICES,
@@ -529,6 +529,7 @@ class NotificationConfig(models.Model):
         verbose_name="提醒偏移小时数",
         help_text="0为截止时发送，正数代表提前发送"
     )
+
 
     # Global template: What does the email subject look like
     subject_template = models.CharField(

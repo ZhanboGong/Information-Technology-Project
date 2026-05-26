@@ -195,6 +195,7 @@ Generated at: {timezone.now().strftime('%Y-%m-%d %H:%M:%S')}
         )
 
         print(f"Report successfully sent: {assignment.title} -> {teacher.email}")
+        send_student_deadline_reminders.delay(assignment_id, list(unsubmitted_students.values_list('id', flat=True)))
         Assignment.objects.filter(id=assignment_id).update(report_sent=True)
 
     except Assignment.DoesNotExist:
@@ -202,6 +203,38 @@ Generated at: {timezone.now().strftime('%Y-%m-%d %H:%M:%S')}
     except Exception as e:
         print(f"Failed to send email: {str(e)}. Retrying...")
         raise self.retry(exc=e, countdown=60)
+
+
+# --- 新增：学生截止提醒任务 ---
+@shared_task(bind=True, max_retries=2)
+def send_student_deadline_reminders(self, assignment_id, student_ids):
+    """Send deadline reminder emails to unsubmitted students."""
+    from .models import Assignment, User
+    from django.conf import settings
+
+    assignment = Assignment.objects.select_related('course').get(id=assignment_id)
+    reminder_count = 0
+
+    for student in User.objects.filter(id__in=student_ids, is_active=True, enable_deadline_reminder=True).exclude(email=''):
+        try:
+            send_mail(
+                f"[Reminder] Upcoming Deadline: {assignment.title}",
+                f"Dear {student.first_name or student.username},\n\n"
+                f"This is a friendly reminder that the assignment \"{assignment.title}\" "
+                f"in course \"{assignment.course.name}\" is due soon.\n\n"
+                f"Deadline: {assignment.deadline.strftime('%Y-%m-%d %H:%M')}\n\n"
+                f"Please submit your work before the deadline.\n\n"
+                f"---\nThis is an automated reminder.",
+                settings.DEFAULT_FROM_EMAIL,
+                [student.email],
+                fail_silently=True,
+            )
+            reminder_count += 1
+        except Exception:
+            pass
+
+    if reminder_count > 0:
+        print(f"[Reminder] Sent {reminder_count} student reminders for '{assignment.title}'")
 
 
 @shared_task(
