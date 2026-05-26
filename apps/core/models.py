@@ -141,7 +141,7 @@ class Course(models.Model):
 class KnowledgePoint(models.Model):
     """
     Knowledge point/assessment dimension model.
-    Supporting hierarchical management (L1 system-level general, L2 course-specific) is a key context for RAG retrieval when AI scoring.
+    Supporting hierarchical management (L1 system-level general, L2 course-specific) is a key context for retrieval when AI scoring.
     """
     name = models.CharField(max_length=100, verbose_name="知识点简称")
     description = models.TextField(null=True, blank=True, verbose_name="详细考核逻辑")
@@ -304,6 +304,7 @@ class AIEvaluation(models.Model):
     static_analysis = models.JSONField(null=True, blank=True, verbose_name="静态分析数据")
     created_at = models.DateTimeField(auto_now_add=True)
     learning_resources = models.JSONField(null=True, blank=True, verbose_name="学习资源推荐")
+    practice_exercises = models.JSONField(null=True, blank=True, verbose_name="练习题目")
 
     # Sprint 2
     plagiarism_info = models.JSONField(

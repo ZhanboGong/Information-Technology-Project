@@ -2642,6 +2642,72 @@ class StudentSubmissionViewSet(viewsets.ModelViewSet):
             return Response({"error": "Failed to generate recommendations at this time."}, status=500)
 
 
+    @action(detail=True, methods=['post'], url_path='generate-exercises')
+    def generate_exercises(self, request, pk=None):
+        """AI generates practice exercises based on a weak knowledge point."""
+        submission = self.get_object()
+        if submission.student != request.user:
+            return Response({"error": "Permission denied"}, status=403)
+
+        evaluation = submission.ai_evaluation
+
+        # Return cached exercises unless force regenerate
+        if request.query_params.get('regenerate') != 'true':
+            if evaluation and evaluation.practice_exercises:
+                return Response(evaluation.practice_exercises)
+
+        kp_name = request.data.get('kp_name', '')
+        if not kp_name:
+            return Response({"error": "Knowledge point name is required"}, status=400)
+
+        # Look up Bloom level from KP database
+        from .models import KnowledgePoint
+        bloom_level = 'apply'
+        try:
+            kp = KnowledgePoint.objects.filter(name=kp_name).first()
+            if kp:
+                bloom_level = kp.bloom_level
+        except Exception:
+            pass
+
+        BLOOM_ORDER = ['remember', 'understand', 'apply', 'analyze', 'evaluate', 'create']
+        current_idx = BLOOM_ORDER.index(bloom_level) if bloom_level in BLOOM_ORDER else 2
+        target_bloom = BLOOM_ORDER[min(current_idx + 1, len(BLOOM_ORDER) - 1)]
+
+        scorer = AIScorer()
+        prompt = f"""
+        Generate 2 short programming exercises for a student weak in "{kp_name}".
+        
+        Current Bloom level: {bloom_level}
+        Target Bloom level: {target_bloom}
+        
+        Each exercise should:
+        - Focus on: {kp_name}
+        - Challenge at the {target_bloom} level (not {bloom_level})
+        - Include a clear problem description
+        - Include sample input and expected output
+        
+        Return ONLY a JSON array: [{{"title": "...", "description": "...", "sample_input": "...", "expected_output": "..."}}, ...]
+        """
+
+        try:
+            raw = scorer.ask(prompt)
+            import re, json
+            match = re.search(r'\[.*\]', raw, re.DOTALL)
+            exercises = json.loads(match.group()) if match else []
+            exercises_data = {
+                "kp_name": kp_name,
+                "current_bloom": bloom_level,
+                "target_bloom": target_bloom,
+                "exercises": exercises
+            }
+            evaluation.practice_exercises = exercises_data
+            evaluation.save(update_fields=['practice_exercises'])
+            return Response(exercises_data)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+
 class UserProfileViewSet(viewsets.GenericViewSet):
     """
     User profile management view set.
