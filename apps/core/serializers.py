@@ -4,7 +4,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.core import exceptions
 from rest_framework import serializers
 from .models import (User, Assignment, Submission, Course, AIEvaluation, KnowledgePoint, DockerReport,
-                     SystemConfiguration, Appeal, NotificationConfig, Group, TeachingInsightReport)
+                     SystemConfiguration, Appeal, NotificationConfig, Group, TeachingInsightReport, Announcement)
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 
@@ -474,4 +474,13 @@ class NotificationConfigSerializer(serializers.ModelSerializer):
         model = NotificationConfig
         fields = ['enable_report', 'remind_before_hours', 'subject_template']
         read_only_fields = ['teacher']
+
+
+class AnnouncementSerializer(serializers.ModelSerializer):
+    teacher_name = serializers.ReadOnlyField(source='teacher.first_name')
+
+    class Meta:
+        model = Announcement
+        fields = ['id', 'course', 'teacher', 'teacher_name', 'content', 'created_at']
+        read_only_fields = ['teacher', 'created_at']
 

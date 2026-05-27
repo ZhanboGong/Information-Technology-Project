@@ -546,6 +546,22 @@ class NotificationConfig(models.Model):
         return f"{self.teacher.username} 的系统设置"
 
 
+class Announcement(models.Model):
+    """Course announcement board."""
+    course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name='announcements')
+    teacher = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    content = models.TextField(verbose_name="公告内容")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = "课程公告"
+        verbose_name_plural = verbose_name
+
+    def __str__(self):
+        return f"[{self.course.name}] {self.content[:50]}"
+
+
 class SystemOperationLog(models.Model):
     """
     Centralized Audit Logging Model.

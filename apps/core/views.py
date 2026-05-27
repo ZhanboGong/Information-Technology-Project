@@ -43,13 +43,15 @@ from reportlab.pdfbase.ttfonts import TTFont
 
 # Import the model and serializer
 from .models import (User, Course, Assignment, Submission, AIEvaluation, KnowledgePoint, SystemConfiguration,
-                     NotificationConfig, Group, SystemOperationLog, EmailVerificationToken, PlagiarismReport)
+                     NotificationConfig, Group, SystemOperationLog, EmailVerificationToken, PlagiarismReport,
+                     Announcement)
 from .serializers import (
     AssignmentSerializer,
     SubmissionSerializer,
     MyTokenObtainPairSerializer,
-    CourseSerializer, KnowledgePointSerializer, UserProfileSerializer, ChangePasswordSerializer, SystemConfigurationSerializer,
-    NotificationConfigSerializer, GroupSerializer
+    CourseSerializer, KnowledgePointSerializer, UserProfileSerializer, ChangePasswordSerializer,
+    SystemConfigurationSerializer,
+    NotificationConfigSerializer, GroupSerializer, AnnouncementSerializer
 )
 from .tasks import async_plagiarism_check
 from .utils.ai_scorer import AIScorer
@@ -3699,4 +3701,27 @@ class DockerManagementViewSet(viewsets.ViewSet):
             })
         except Exception as e:
             return Response({"error": f"Cleanup failed:{str(e)}"}, status=500)
+
+
+class AnnouncementViewSet(viewsets.ModelViewSet):
+    """Course announcements."""
+    serializer_class = AnnouncementSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        course_id = self.request.query_params.get('course_id')
+        if user.role == 'student':
+            # Students see announcements for their enrolled courses
+            qs = Announcement.objects.filter(course__students=user)
+        elif user.role == 'teacher':
+            qs = Announcement.objects.filter(teacher=user)
+        else:
+            qs = Announcement.objects.all()
+        if course_id:
+            qs = qs.filter(course_id=course_id)
+        return qs.order_by('-created_at')
+
+    def perform_create(self, serializer):
+        serializer.save(teacher=self.request.user)
 
