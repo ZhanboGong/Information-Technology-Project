@@ -51,7 +51,7 @@ class DockerRunner:
         except Exception:
             return class_simple_name
 
-    def run_code(self, file_path, is_project=True, project_root=None):
+    def run_code(self, file_path, is_project=True, project_root=None, stdin=None):
         """
         Execute the specified code file in the sandbox and capture the execution result.
 
@@ -98,6 +98,11 @@ class DockerRunner:
                 rel_path = os.path.basename(abs_file_path)
 
             command = f"python {rel_path}"
+            if stdin:
+                stdin_file = os.path.join(effective_root, f".stdin_{os.path.basename(abs_file_path)}")
+                with open(stdin_file, 'w', encoding='utf-8') as sf:
+                    sf.write(stdin)
+                command = f"sh -c 'python {rel_path} < .stdin_{os.path.basename(abs_file_path)}'"
         elif ext == '.java':
             image = "eclipse-temurin:17-jdk-alpine"
             full_class_name = self._get_java_full_class_name(abs_file_path)
@@ -130,6 +135,10 @@ class DockerRunner:
         except Exception as e:
             return {"exit_code": -1, "output": str(e), "status": "error"}
         finally:
+            if stdin:
+                sf_path = os.path.join(effective_root, f".stdin_{os.path.basename(abs_file_path)}")
+                if os.path.exists(sf_path):
+                    os.remove(sf_path)
             if container:
                 try:
                     container.remove(force=True)

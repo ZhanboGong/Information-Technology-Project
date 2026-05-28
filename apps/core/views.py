@@ -2709,6 +2709,34 @@ class StudentSubmissionViewSet(viewsets.ModelViewSet):
         except Exception as e:
             return Response({"error": str(e)}, status=500)
 
+    @action(detail=False, methods=['post'], url_path='exercises/run')
+    def run_exercise_code(self, request):
+        """Run exercise code in Docker sandbox."""
+        code = request.data.get('code', '')
+        language = request.data.get('language', 'python')
+        stdin_data = request.data.get('stdin', '')
+
+        if not code.strip():
+            return Response({"error": "Code cannot be empty"}, status=400)
+
+        import tempfile, os
+        from .utils.docker_runner import DockerRunner
+
+        tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.py' if language == 'python' else '.java', delete=False, encoding='utf-8')
+        tmp.write(code)
+        tmp.close()
+
+        try:
+            runner = DockerRunner()
+            result = runner.run_code(tmp.name, is_project=False, stdin=stdin_data)
+            return Response({
+                "exit_code": result.get('exit_code'),
+                "stdout": result.get('output', ''),
+                "status": result.get('status', 'error')
+            })
+        finally:
+            os.unlink(tmp.name)
+
 
 class UserProfileViewSet(viewsets.GenericViewSet):
     """
