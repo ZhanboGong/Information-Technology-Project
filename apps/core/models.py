@@ -1,3 +1,4 @@
+import os
 from datetime import timedelta
 from django.utils import timezone
 from django.db import models
@@ -233,6 +234,19 @@ class Assignment(models.Model):
 
     def __str__(self):
         return self.title
+
+
+class AssignmentAttachment(models.Model):
+    """Multiple reference/solution files attached to an assignment."""
+    assignment = models.ForeignKey(Assignment, on_delete=models.CASCADE, related_name='reference_files')
+    file = models.FileField(upload_to='assignments/references/%Y/%m/%d/')
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    def filename(self):
+        return os.path.basename(self.file.name)
+
+    def __str__(self):
+        return f"{self.assignment.title} — {self.filename()}"
 
 
 # 5. Submission Table

@@ -1,7 +1,8 @@
 import ast
 import difflib
 
-
+# 当前代码暂时不使用，但考虑到后续项目结束后是否需要继续开发的问题，这里不将代码进行删除
+# The current code will not be used for now, but it will not be removed to consider whether it is necessary to continue development after the end of the project
 class PlagiarismTransformer(ast.NodeTransformer):
     """
     现改为使用Moss

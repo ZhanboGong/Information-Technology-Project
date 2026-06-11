@@ -158,11 +158,11 @@ class AIScorer:
 
         # 3. Construct sandbox fact evidence
         if not docker_report.compile_status:
-            sandbox_evidence = f"🚨 Compilation Failed: The code did not compile successfully.\nError:\n{docker_report.stdout}"
+            sandbox_evidence = f"[FAIL] Compilation Failed: The code did not compile successfully.\nError:\n{docker_report.stdout}"
         elif docker_report.exit_code != 0:
-            sandbox_evidence = f"⚠️ Execution Failed (exit code {docker_report.exit_code}): The code compiled but did not run successfully.\nNote: '{docker_report.stdout}' — for library/framework projects without a main method, this is expected and should NOT affect scoring. Evaluate the source code structure, design, and rubric compliance directly."
+            sandbox_evidence = f"[WARN] Execution Failed (exit code {docker_report.exit_code}): The code compiled but did not run successfully.\nNote: '{docker_report.stdout}' — for library/framework projects without a main method, this is expected and should NOT affect scoring. Evaluate the source code structure, design, and rubric compliance directly."
         else:
-            sandbox_evidence = f"✅ Execution Successful:\nSTDOUT: {docker_report.stdout or 'Empty'}\nSTDERR: {docker_report.stderr or 'None'}"
+            sandbox_evidence = f"[PASS] Execution Successful:\nSTDOUT: {docker_report.stdout or 'Empty'}\nSTDERR: {docker_report.stderr or 'None'}"
 
         # 3.5 Static analysis report
         if static_report and 'error' not in static_report:
@@ -185,9 +185,9 @@ class AIScorer:
             compliance = StaticAnalyzer.check_interface_compliance(project_path)
             if compliance['issues']:
                 compliance_evidence = (
-                    f"### ⚠️ Structural Compliance Issues (CRITICAL):\n"
+                    f"### [WARN] Structural Compliance Issues (CRITICAL):\n"
                     f"The following required features are MISSING from the student's code:\n"
-                    + "\n".join(f"- ❌ {issue}" for issue in compliance['issues'])
+                    + "\n".join(f"- [MISS] {issue}" for issue in compliance['issues'])
                     + "\nThese are REQUIREMENT GAPS, not style issues. Score affected dimensions accordingly.\n"
                 )
             else:
@@ -231,27 +231,27 @@ class AIScorer:
                 **Source A — Explicit Requirements (Section 0):**
                 From the Assignment Requirements text, extract EVERY specific task, feature, or deliverable.
                 For each, compare against the Student Source Code (Section 4) and mark:
-                  ✅ FULLY IMPLEMENTED — feature is CORRECT, COMPLETE, and handles normal and edge cases
-                  ❌ NOT IMPLEMENTED — feature is completely missing
-                  ⚠️ PARTIALLY IMPLEMENTED — feature exists but is buggy, incomplete, or misses key logic
+                  [PASS] FULLY IMPLEMENTED — feature is CORRECT, COMPLETE, and handles normal and edge cases
+                  [MISS] NOT IMPLEMENTED — feature is completely missing
+                  [WARN] PARTIALLY IMPLEMENTED — feature exists but is buggy, incomplete, or misses key logic
 
                 CRITICAL DISTINCTION — "PARTIALLY" vs "FULLY":
-                - If the code has a relevant function/class/method but the logic is flawed, mark ⚠️ PARTIALLY
-                - If the code mentions the concept but doesn't actually solve the problem, mark ⚠️ PARTIALLY  
-                - Only mark ✅ FULLY if you would give this feature at least a C-grade (65+) if graded in isolation
+                - If the code has a relevant function/class/method but the logic is flawed, mark [WARN] PARTIALLY
+                - If the code mentions the concept but doesn't actually solve the problem, mark [WARN] PARTIALLY  
+                - Only mark [PASS] FULLY if you would give this feature at least a C-grade (65+) if graded in isolation
 
-                Source A implemented count = (count of ✅) + (count of ⚠️ × 0.5)
+                Source A implemented count = (count of [PASS]) + (count of [WARN] × 0.5)
 
                 **Source B — Rubric Minimum Requirements (Section 2):**
                 Each dimension in the rubric has a P-level (Pass) description defining its MINIMUM standard.
                 For EACH rubric dimension, read its P-level description and determine:
-                  ✅ MEETS EXPECTATION — student's work satisfies at least the C-level (Credit) description in the rubric
-                  ❌ BELOW EXPECTATION — work only reaches P-level or below
+                  [PASS] MEETS EXPECTATION — student's work satisfies at least the C-level (Credit) description in the rubric
+                  [MISS] BELOW EXPECTATION — work only reaches P-level or below
                 
-                IMPORTANT: P-level means "barely passable." Only count a dimension as ✅ if the student 
+                IMPORTANT: P-level means "barely passable." Only count a dimension as [PASS] if the student 
                 demonstrates competence beyond the bare minimum — at least C-level. 
-                If the work only scrapes by at P-level, mark ❌.
-                Source B implemented count = count of ✅
+                If the work only scrapes by at P-level, mark [MISS].
+                Source B implemented count = count of [PASS]
                 From your Source B analysis, also produce a per-dimension completion rate (0-100): for each rubric dimension, estimate how fully the student has completed that specific dimension's requirements.
 
                 **Combined Completion Rate:**
@@ -355,7 +355,7 @@ class AIScorer:
             suggestion_text = review_context.get('suggestion', '')
             review_block = f"""
 
-                        ### ⚠️ QUALITY REVIEW: The previous scoring attempt was flagged for the following issues:
+                        ### [WARN] QUALITY REVIEW: The previous scoring attempt was flagged for the following issues:
                         {issues_text}
 
                         Review Instruction: {suggestion_text}
@@ -465,7 +465,7 @@ class AIScorer:
                                 if any(kw in kp_name.lower() for kw in
                                        ['collection', 'exception', 'i/o', 'file']):
                                     kp_scores[kp_name] = min(float(kp_scores.get(kp_name, 50)), 30)
-                    result['feedback'] += "\n\n---\n## ⚠️ Structural Compliance Report\n"
+                    result['feedback'] += "\n\n---\n## [WARN] Structural Compliance Report\n"
                     for issue in compliance['issues']:
                         result['feedback'] += f"- {issue}\n"
 

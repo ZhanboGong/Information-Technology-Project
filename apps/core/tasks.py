@@ -37,7 +37,7 @@ def run_grading_task(submission_id, temp_workspace, entry_point=None):
         pipeline.run_full_pipeline(entry_point=entry_point, work_dir=temp_workspace)
 
     except Exception as e:
-        print(f"🚨 Celery Task Error: {str(e)}")
+        print(f"[ERROR] Celery Task Error: {str(e)}")
     finally:
         # Regardless of success or failure, clean up the temporary directory
         if temp_workspace and os.path.exists(temp_workspace):
@@ -251,12 +251,12 @@ def async_generate_teaching_insights(self, assignment_id):
     4. Persist the results to the TeachingInsightReport table
     """
     print("\n" + "=" * 30)
-    print(f"🔥 WORKER IS ACTUALLY RUNNING: {assignment_id}")
+    print(f"[INFO] WORKER IS ACTUALLY RUNNING: {assignment_id}")
     print("=" * 30 + "\n")
     report = None
     try:
         # Initialize: Get the object and mark the state
-        print(f"🚀 [TASK START] Processing Assignment ID: {assignment_id}")
+        print(f"[START] [TASK START] Processing Assignment ID: {assignment_id}")
         assignment = Assignment.objects.get(id=assignment_id)
 
         # Get or create a report record
@@ -279,7 +279,7 @@ def async_generate_teaching_insights(self, assignment_id):
                     seen_students.add(s.student_id)
 
         if not best_submissions:
-            print(f"⚠️ [TASK] No submissions found for assignment {assignment_id}")
+            print(f"[WARN] [TASK] No submissions found for assignment {assignment_id}")
             report.status = 'error'
             report.save()
             return "No submissions found"
@@ -342,9 +342,9 @@ def async_generate_teaching_insights(self, assignment_id):
         - "suggestions": A list of 3 specific, actionable teaching adjustments for the next lecture (in English).
         """
 
-        print("🤖 [TASK] Calling AI Scorer...")
+        print("[AI] [TASK] Calling AI Scorer...")
         raw_res = scorer.ask(prompt)
-        print("✅ [TASK] AI Scorer Responded!")
+        print("[OK] [TASK] AI Scorer Responded!")
 
         # 4. Robust JSON parsing logic
         try:
@@ -356,7 +356,7 @@ def async_generate_teaching_insights(self, assignment_id):
 
             insights = json.loads(clean_json_str)
         except Exception as json_err:
-            print(f"❌ [TASK] JSON Parse Error: {str(json_err)}")
+            print(f"[FAIL] [TASK] JSON Parse Error: {str(json_err)}")
             insights = {
                 "analysis": "AI response format error — please review raw data below.",
                 "strengths": ["Data parsing failed"],
@@ -375,11 +375,11 @@ def async_generate_teaching_insights(self, assignment_id):
         report.status = 'ready'
         report.save()
 
-        print(f"🎉 [TASK SUCCESS] Report updated for {assignment.title}")
+        print(f"[DONE] [TASK SUCCESS] Report updated for {assignment.title}")
         return f"Success for {assignment.id}"
 
     except Exception as e:
-        print(f"🔥 [TASK FATAL ERROR] {str(e)}")
+        print(f"[INFO] [TASK FATAL ERROR] {str(e)}")
         if report:
             report.status = 'error'
             report.save()

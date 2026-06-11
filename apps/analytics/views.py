@@ -355,7 +355,7 @@ class AnalyticsViewSet(viewsets.ViewSet):
             for item in student_best:
                 student_scores[item['student']].append(float(item['best'] or 0))
 
-            # 计算每个学生的课程均值
+            # Calculate the course mean for each student
             student_avgs = []
             for sid, scores in student_scores.items():
                 avg = sum(scores) / len(scores) if scores else 0

@@ -20,7 +20,7 @@ from .views import (
     SystemMonitorView,
     AdminSystemLogView, NotificationConfigViewSet, DockerManagementViewSet,
     register_teacher, verify_email, AdminAIUsageStatsView, AdminSystemHealthView, AdminKnowledgePointViewSet,
-    request_password_reset, confirm_password_reset, AnnouncementViewSet
+    request_password_reset, confirm_password_reset, AnnouncementViewSet, AssignmentAttachmentViewSet
 )
 from rest_framework_simplejwt.views import TokenRefreshView
 
@@ -60,6 +60,8 @@ router.register(r'notification-config', NotificationConfigViewSet, basename='not
 router.register(r'docker', DockerManagementViewSet, basename='docker')
 
 router.register(r'announcements', AnnouncementViewSet, basename='announcement')
+
+router.register(r'attachments', AssignmentAttachmentViewSet, basename='assignment-attachment')
 
 # define the final list of URL mappings
 urlpatterns = [

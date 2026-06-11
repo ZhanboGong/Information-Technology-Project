@@ -92,8 +92,8 @@ class AssignmentAdmin(admin.ModelAdmin):
     @admin.display(description='报告状态')
     def report_sent_status(self, obj):
         if obj.report_sent:
-            return mark_safe('<span style="color: #28a745;">✅ 已发送</span>')
-        return mark_safe('<span style="color: #6c757d;">⏳ 待触发</span>')
+            return mark_safe('<span style="color: #28a745;">[OK] 已发送</span>')
+        return mark_safe('<span style="color: #6c757d;">[PENDING] 待触发</span>')
 
     @admin.display(description='教情报告', boolean=True)
     def has_ai_insight(self, obj):
@@ -116,7 +116,7 @@ class SubmissionAdmin(admin.ModelAdmin):
     @admin.display(description='申诉')
     def appeal_status(self, obj):
         if hasattr(obj, 'ai_evaluation') and hasattr(obj.ai_evaluation, 'appeal'):
-            return mark_safe('<span style="color: #e67e22; font-weight: bold;">⚠️ 已申诉</span>')
+            return mark_safe('<span style="color: #e67e22; font-weight: bold;">[WARN] 已申诉</span>')
         return "-"
 
     @admin.display(description='得分')

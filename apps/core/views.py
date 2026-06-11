@@ -44,14 +44,14 @@ from reportlab.pdfbase.ttfonts import TTFont
 # Import the model and serializer
 from .models import (User, Course, Assignment, Submission, AIEvaluation, KnowledgePoint, SystemConfiguration,
                      NotificationConfig, Group, SystemOperationLog, EmailVerificationToken, PlagiarismReport,
-                     Announcement)
+                     Announcement, AssignmentAttachment)
 from .serializers import (
     AssignmentSerializer,
     SubmissionSerializer,
     MyTokenObtainPairSerializer,
     CourseSerializer, KnowledgePointSerializer, UserProfileSerializer, ChangePasswordSerializer,
     SystemConfigurationSerializer,
-    NotificationConfigSerializer, GroupSerializer, AnnouncementSerializer
+    NotificationConfigSerializer, GroupSerializer, AnnouncementSerializer, AssignmentAttachmentSerializer
 )
 from .tasks import async_plagiarism_check
 from .utils.ai_scorer import AIScorer
@@ -503,7 +503,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
         # 2. Instantiate and validate (in this case rubric_config is {}, it must pass the format check)
         serializer = self.get_serializer(data=data)
         if not serializer.is_valid():
-            print("❌ Detailed validation failed:", serializer.errors)
+            print("[FAIL] Detailed validation failed:", serializer.errors)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         # 3. Calling save logic
@@ -616,7 +616,7 @@ class TeacherAssignmentViewSet(viewsets.ModelViewSet):
             except Exception as log_e:
                 print(f"Logging failure: {log_e}")
         except Exception as e:
-            print(f"⚠️ Update JSON/M2M Patch Error: {e}")
+            print(f"[WARN] Update JSON/M2M Patch Error: {e}")
 
         return Response(serializer.data)
 
@@ -3752,4 +3752,32 @@ class AnnouncementViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(teacher=self.request.user)
+
+
+class AssignmentAttachmentViewSet(viewsets.ModelViewSet):
+    """Upload/delete reference files for assignments."""
+    serializer_class = AssignmentAttachmentSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        assignment_id = self.request.query_params.get('assignment_id')
+        if user.role == 'student':
+            qs = AssignmentAttachment.objects.filter(
+                assignment__course__students=user
+            )
+        elif user.role == 'teacher':
+            qs = AssignmentAttachment.objects.filter(
+                assignment__teacher=user
+            )
+        else:
+            qs = AssignmentAttachment.objects.all()
+        if assignment_id:
+            qs = qs.filter(assignment_id=assignment_id)
+        return qs.order_by('-uploaded_at')
+
+    def perform_create(self, serializer):
+        assignment_id = self.request.data.get('assignment')
+        assignment = get_object_or_404(Assignment, id=assignment_id, teacher=self.request.user)
+        serializer.save(assignment=assignment)
 

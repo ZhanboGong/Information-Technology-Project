@@ -4,7 +4,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.core import exceptions
 from rest_framework import serializers
 from .models import (User, Assignment, Submission, Course, AIEvaluation, KnowledgePoint, DockerReport,
-                     SystemConfiguration, Appeal, NotificationConfig, Group, TeachingInsightReport, Announcement)
+                     SystemConfiguration, Appeal, NotificationConfig, Group, TeachingInsightReport, Announcement, AssignmentAttachment)
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 
@@ -98,6 +98,19 @@ class GroupSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'leader', 'invite_code', 'created_at']
 
 
+class AssignmentAttachmentSerializer(serializers.ModelSerializer):
+    filename = serializers.SerializerMethodField()
+    assignment = serializers.PrimaryKeyRelatedField(queryset=Assignment.objects.all())
+
+    class Meta:
+        model = AssignmentAttachment
+        fields = ['id', 'assignment', 'file', 'filename', 'uploaded_at']
+        read_only_fields = ['uploaded_at']
+
+    def get_filename(self, obj):
+        return obj.filename()
+
+
 # --- 5. Assessment serializer ---
 class AssignmentSerializer(serializers.ModelSerializer):
     """
@@ -116,6 +129,7 @@ class AssignmentSerializer(serializers.ModelSerializer):
     has_report = serializers.SerializerMethodField()
     submission_count = serializers.SerializerMethodField()
     total_students = serializers.SerializerMethodField()
+    reference_files = AssignmentAttachmentSerializer(many=True, read_only=True)
 
 
     class Meta:
@@ -134,6 +148,7 @@ class AssignmentSerializer(serializers.ModelSerializer):
             'kp_details',
             'teacher',
             'category',
+            'reference_files',
             'attachment',
             'attachment_name',
             'is_group',
@@ -483,4 +498,7 @@ class AnnouncementSerializer(serializers.ModelSerializer):
         model = Announcement
         fields = ['id', 'course', 'teacher', 'teacher_name', 'content', 'created_at']
         read_only_fields = ['teacher', 'created_at']
+
+
+
 

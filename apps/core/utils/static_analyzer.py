@@ -45,7 +45,7 @@ class StaticAnalyzer:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 code = f.read()
 
-            # 1. 圈复杂度
+            # 1. cyclomatic complexity
             cc_results = cc_visit(code)
             cc_scores = []
             for block in cc_results:
@@ -57,10 +57,10 @@ class StaticAnalyzer:
             avg_cc = sum(c['complexity'] for c in cc_scores) / len(cc_scores) if cc_scores else 0
             max_cc = max((c['complexity'] for c in cc_scores), default=0)
 
-            # 2. 可维护性指数
+            # 2. maintainability index
             mi_score = radon.mi.mi_visit(code, True)
 
-            # 3. 原始指标（LOC, SLOC, comments 等）
+            # 3. Original indicators (LOC, SLOC, comments, etc.)
             raw = raw_analyze(code)
 
             return {
@@ -98,18 +98,18 @@ class StaticAnalyzer:
             lines = code.split('\n')
             total_loc = len(lines)
 
-            # 有效代码行（去掉空行和纯注释行）
+            # Effective code lines (excluding blank lines and pure comment lines)
             code_lines = [l for l in lines if l.strip() and not l.strip().startswith('//') and not l.strip().startswith('*')]
             sloc = len(code_lines)
 
-            # 注释行
+            # comment line
             comment_lines = [l for l in lines if l.strip().startswith('//') or l.strip().startswith('*')]
 
-            # 方法数量
+            # Number of methods
             methods = re.findall(r'(?:public|private|protected|static|\s)+[\w<>\[\]]+\s+(\w+)\s*\(', code)
             method_count = len(methods)
 
-            # 嵌套深度
+            # nesting depth
             max_depth = 0
             for line in code_lines:
                 stripped = line.lstrip()

@@ -2,7 +2,8 @@ import os
 import chromadb
 from chromadb.utils import embedding_functions
 
-
+# 本代码为项目开始前废弃的方案，原因是可能没有足够的知识储备将这种方式运用到我们的项目当中，当然，这种方式比我们当前的方式要更加好和先进，项目结束后如果还要继续开发，会考虑使用这种方法，所以并没有将代码进行删除。
+# The reason is that we may not have enough knowledge reserve to apply this method to our project. Of course, this method is better and more advanced than our current method. If we want to continue to develop after the end of the project, we will consider using this method, so we did not delete the code.
 class TripleLayerRAG:
     def __init__(self, db_path="./vector_db"):
         # 1. 初始化持久化客户端
